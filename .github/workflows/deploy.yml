@@ -1,0 +1,70 @@
+name: CD Node with Docker
+
+on:
+  push:
+    branches:
+      - 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🐳 Docker build & push
+        run: |
+          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+          cd websocket-server
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_IMAGE_NODE }} .
+          docker push ${{ secrets.DOCKER_USERNAME }}/${{ secrets.DOCKER_IMAGE_NODE }}
+
+      - name: deploy to server (Node)
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_KEY }}
+          port: ${{ secrets.EC2_PORT }}
+          script: |
+            DOCKER_USERNAME="${{ secrets.DOCKER_USERNAME }}"
+            DOCKER_IMAGE_NODE="${{ secrets.DOCKER_IMAGE_NODE }}"
+            NODE_PORT="${{ secrets.NODE_PORT }}"
+            OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"
+            PUBLIC_URL="${{ secrets.PUBLIC_URL }}"
+            WEBHOOK_URL="${{ secrets.WEBHOOK_URL }}"
+            TWILIO_ACCOUNT_SID="${{ secrets.TWILIO_ACCOUNT_SID }}"
+            TWILIO_AUTH_TOKEN="${{ secrets.TWILIO_AUTH_TOKEN }}"
+            TWILIO_CALLER_NUMBER="${{ secrets.TWILIO_CALLER_NUMBER }}"
+            TWILIO_RECIPIENT_NUMBER="${{ secrets.TWILIO_RECIPIENT_NUMBER }}"
+
+            echo "Stopping existing container"
+            sudo docker stop medicare-node || true
+            sudo docker rm medicare-node || true
+
+            echo "Current containers:"
+            sudo docker ps -a
+
+            echo "Pulling new image"
+            sudo docker pull ${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}
+
+            echo "이미지명: ${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}"
+
+            echo "Running new node container"
+            sudo docker run -d -p ${NODE_PORT}:3000 --name medicare-node \
+            -e OPENAI_API_KEY=${OPENAI_API_KEY} \
+            -e PUBLIC_URL=${PUBLIC_URL} \
+            -e WEBHOOK_URL=${WEBHOOK_URL} \
+            -e TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID} \
+            -e TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN} \
+            -e TWILIO_CALLER_NUMBER=${TWILIO_CALLER_NUMBER} \
+            -e TWILIO_RECIPIENT_NUMBER=${TWILIO_RECIPIENT_NUMBER} \
+            ${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}
+
+            echo "Cleaning up old images"
+            sudo docker image prune -f
+
+            echo "Node Deployment completed successfully!"
