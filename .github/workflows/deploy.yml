@@ -54,7 +54,7 @@ jobs:
             echo "이미지명: ${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}"
 
             echo "Running new node container"
-            sudo docker run -d -p ${NODE_PORT}:3000 --name medicare-node \
+            sudo docker run -d -p ${NODE_PORT}:8081 --name medicare-node \
             -e OPENAI_API_KEY=${OPENAI_API_KEY} \
             -e PUBLIC_URL=${PUBLIC_URL} \
             -e WEBHOOK_URL=${WEBHOOK_URL} \
