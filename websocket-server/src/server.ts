@@ -12,8 +12,22 @@ import {
   handleFrontendConnection,
   sendToWebhook,
 } from "./sessionManager";
+import winston from "winston";
 
 dotenv.config();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.simple()
+  ),
+  transports: [
+    new winston.transports.Console(),
+    // 필요시 파일 저장도 추가 가능
+    // new winston.transports.File({ filename: 'combined.log' })
+  ]
+});
 
 const PORT = parseInt(process.env.PORT || "8081", 10);
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
@@ -27,7 +41,7 @@ const TWILIO_RECIPIENT_NUMBER = process.env.TWILIO_RECIPIENT_NUMBER!;
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 if (!OPENAI_API_KEY) {
-  console.error("OPENAI_API_KEY environment variable is required");
+  logger.error("OPENAI_API_KEY environment variable is required");
   process.exit(1);
 }
 
@@ -58,25 +72,56 @@ let currentCall: WebSocket | null = null;
 let currentLogs: WebSocket | null = null;
 
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
-  const url = new URL(req.url || "", `http://${req.headers.host}`);
-  const parts = url.pathname.split("/").filter(Boolean);
+  try {
+    const url = new URL(req.url || "", `http://${req.headers.host}`);
+    const parts = url.pathname.split("/").filter(Boolean);
 
-  if (parts.length < 1) {
-    ws.close();
-    return;
-  }
+    if (parts.length < 1) {
+      logger.error("WS 연결 URL이 올바르지 않습니다:", req.url);
+      ws.close();
+      return;
+    }
 
-  const type = parts[0];
+    const type = parts[0];
+    logger.info(`WS 새 연결: type=${type}, url=${req.url}`);
 
-  if (type === "call") {
-    if (currentCall) currentCall.close();
-    currentCall = ws;
-    handleCallConnection(currentCall, OPENAI_API_KEY, WEBHOOK_URL);
-  } else if (type === "logs") {
-    if (currentLogs) currentLogs.close();
-    currentLogs = ws;
-    handleFrontendConnection(currentLogs);
-  } else {
+    if (type === "call") {
+      if (currentCall) {
+        logger.info("WS 기존 call 연결 종료");
+        currentCall.close();
+      }
+      currentCall = ws;
+      try {
+        handleCallConnection(currentCall, OPENAI_API_KEY, WEBHOOK_URL);
+        logger.info("WS handleCallConnection 호출 완료");
+      } catch (err) {
+        logger.error("WS handleCallConnection 중 에러:", err);
+      }
+    } else if (type === "logs") {
+      if (currentLogs) {
+        logger.info("WS 기존 logs 연결 종료");
+        currentLogs.close();
+      }
+      currentLogs = ws;
+      try {
+        handleFrontendConnection(currentLogs);
+        logger.info("WS handleFrontendConnection 호출 완료");
+      } catch (err) {
+        logger.error("WS handleFrontendConnection 중 에러:", err);
+      }
+    } else {
+      logger.error(`WS 알 수 없는 연결 type: ${type}`);
+      ws.close();
+    }
+
+    ws.on("error", (err) => {
+      logger.error(`WS WebSocket 에러(type=${type}):`, err);
+    });
+    ws.on("close", (code, reason) => {
+      logger.info(`WS WebSocket 연결 종료(type=${type}), code=${code}, reason=${reason}`);
+    });
+  } catch (err) {
+    logger.error("WS connection 핸들러에서 예외 발생:", err);
     ws.close();
   }
 });
@@ -90,10 +135,10 @@ app.get("/call", async (req, res) => {
       from: TWILIO_CALLER_NUMBER,
     });
 
-    console.log("📞 전화 연결 시작:", call.sid);
+    logger.info("전화 연결 시작:", call.sid);
     res.json({ success: true, sid: call.sid });
   } catch (err) {
-    console.error("❌ 전화 실패:", err);
+    logger.error("전화 실패:", err);
     res.status(500).json({ success: false, error: String(err) });
   }
 });
@@ -123,14 +168,14 @@ app.get("/test-webhook", async (req, res) => {
 
   try {
     await sendToWebhook(testData);
-    console.log("✅ 테스트 웹훅 전송 완료");
+    logger.info("테스트 웹훅 전송 완료");
     res.json({ 
       success: true, 
       message: "웹훅 전송 완료! Webhook.site에서 확인해보세요.",
       webhookUrl: WEBHOOK_URL 
     });
   } catch (error) {
-    console.error("❌ 테스트 웹훅 전송 실패:", error);
+    logger.error("테스트 웹훅 전송 실패:", error);
     res.status(500).json({ 
       success: false, 
       error: String(error) 
@@ -139,5 +184,5 @@ app.get("/test-webhook", async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  logger.info(`Server running on http://localhost:${PORT}`);
 });
