@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Router } from "express";
 import twilio from "twilio";
 import { WebSocketServer, WebSocket } from "ws";
 import { IncomingMessage } from "http";
@@ -60,6 +60,9 @@ app.get("/public-url", (req, res) => {
 });
 
 app.all("/twiml", (req, res) => {
+  logger.info(
+    `/twiml 요청: method=${req.method}, ip=${req.ip}, ua=${req.headers["user-agent"]}`
+  );
   const wsUrl = new URL(PUBLIC_URL);
   wsUrl.protocol = "wss:";
   wsUrl.pathname = `/call`;
@@ -126,8 +129,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   }
 });
 
+const callRouter = Router();
 
-app.get("/call", async (req, res) => {
+callRouter.get("/", async (req, res) => {
   try {
     const call = await twilioClient.calls.create({
       url: `${PUBLIC_URL}/twiml`,
@@ -142,6 +146,7 @@ app.get("/call", async (req, res) => {
     res.status(500).json({ success: false, error: String(err) });
   }
 });
+app.use("/call", callRouter);
 
 // 웹훅 전송 테스트 엔드포인트
 app.get("/test-webhook", async (req, res) => {
