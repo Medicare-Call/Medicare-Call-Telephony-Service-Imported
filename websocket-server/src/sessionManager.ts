@@ -302,7 +302,7 @@ async function handleTwilioMessage(data: RawData, sessionId: string) {
       if (isOpen(modelConn)) {
         jsonSend(modelConn, {
           type: "input_audio_buffer.append",
-          audio: msg.media.payload,
+          audio: msg.media.payload, //Twilio에서 받은 음성을 OpenAI로 전송
         });
       }
       break;
@@ -379,11 +379,24 @@ async function tryConnectModel(sessionId: string) {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        turn_detection: { type: "server_vad" },
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.5,           // 음성 감지 임계값
+          prefix_padding_ms: 300,   // 음성 시작 전 패딩
+          silence_duration_ms: 200  // 침묵 지속 시간
+        },
         voice: "ash",
         input_audio_transcription: { model: "whisper-1" }, //stt
         input_audio_format: "g711_ulaw",
         output_audio_format: "g711_ulaw",
+
+        // 소음 제거 및 오디오 처리 옵션
+        input_audio_preprocessing: {
+          noise_suppression: true,    // 소음 제거 활성화
+          echo_cancellation: true,    // 에코 제거
+          auto_gain_control: true     // 자동 음량 조절
+        },
+
         ...config,
       },
     };
