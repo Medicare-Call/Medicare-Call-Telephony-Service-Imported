@@ -1,4 +1,4 @@
-import express, { Router } from "express";
+import express from "express";
 import twilio from "twilio";
 import { WebSocketServer, WebSocket } from "ws";
 import { IncomingMessage } from "http";
@@ -46,92 +46,44 @@ if (!OPENAI_API_KEY) {
 }
 
 const app = express();
-app.use(cors());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-app.use(express.urlencoded({ extended: false }));
+app.use(cors());
+app.use(express.json()); // JSON body 파싱
+app.use(express.urlencoded({ extended: true })); // URL-encoded body 파싱 (하나만 사용)
 
+//메모리에 웹소켓 연결을 저장하는 Map 객체
+export const callConnections = new Map<string, WebSocket>(); //Twilio 연결
+export const modelConnections = new Map<string, WebSocket>(); //OpenAI 연결
+export const frontendConnections = new Map<string, WebSocket>(); //Frontend 연결
 const twimlPath = join(__dirname, "twiml.xml");
 const twimlTemplate = readFileSync(twimlPath, "utf-8");
 
-app.get("/public-url", (req, res) => {
+const mainRouter = express.Router();
+
+mainRouter.get("/public-url", (req, res) => {
   res.json({ publicUrl: PUBLIC_URL });
 });
 
-app.all("/twiml", (req, res) => {
-  logger.info(
-    `/twiml 요청: method=${req.method}, ip=${req.ip}, ua=${req.headers["user-agent"]}`
-  );
+mainRouter.post("/twiml", (req,res) => {
+  const callSid = req.body.CallSid; // Twilio 요청에서 CallSid 추출
+  if (!callSid) {
+    res.status(400).send("CallSid is required");
+  }
+
+  logger.info(`TwiML 요청 for CallSid: ${callSid}`);
+
   const wsUrl = new URL(PUBLIC_URL);
   wsUrl.protocol = "wss:";
-  wsUrl.pathname = `/call`;
+  // WebSocket 경로에 CallSid를 포함시켜 어떤 통화에 대한 연결인지 식별
+  wsUrl.pathname = `/call/${callSid}`;
 
   const twimlContent = twimlTemplate.replace("{{WS_URL}}", wsUrl.toString());
   res.type("text/xml").send(twimlContent);
 });
 
-let currentCall: WebSocket | null = null;
-let currentLogs: WebSocket | null = null;
-
-wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
-  try {
-    const url = new URL(req.url || "", `http://${req.headers.host}`);
-    const parts = url.pathname.split("/").filter(Boolean);
-
-    if (parts.length < 1) {
-      logger.error("WS 연결 URL이 올바르지 않습니다:", req.url);
-      ws.close();
-      return;
-    }
-
-    const type = parts[0];
-    logger.info(`WS 새 연결: type=${type}, url=${req.url}`);
-
-    if (type === "call") {
-      if (currentCall) {
-        logger.info("WS 기존 call 연결 종료");
-        currentCall.close();
-      }
-      currentCall = ws;
-      try {
-        handleCallConnection(currentCall, OPENAI_API_KEY, WEBHOOK_URL);
-        logger.info("WS handleCallConnection 호출 완료");
-      } catch (err) {
-        logger.error("WS handleCallConnection 중 에러:", err);
-      }
-    } else if (type === "logs") {
-      if (currentLogs) {
-        logger.info("WS 기존 logs 연결 종료");
-        currentLogs.close();
-      }
-      currentLogs = ws;
-      try {
-        handleFrontendConnection(currentLogs);
-        logger.info("WS handleFrontendConnection 호출 완료");
-      } catch (err) {
-        logger.error("WS handleFrontendConnection 중 에러:", err);
-      }
-    } else {
-      logger.error(`WS 알 수 없는 연결 type: ${type}`);
-      ws.close();
-    }
-
-    ws.on("error", (err) => {
-      logger.error(`WS WebSocket 에러(type=${type}):`, err);
-    });
-    ws.on("close", (code, reason) => {
-      logger.info(`WS WebSocket 연결 종료(type=${type}), code=${code}, reason=${reason}`);
-    });
-  } catch (err) {
-    logger.error("WS connection 핸들러에서 예외 발생:", err);
-    ws.close();
-  }
-});
-
-const callRouter = Router();
-
-callRouter.get("/", async (req, res) => {
+mainRouter.get("/call", async (req, res) => {
   try {
     const call = await twilioClient.calls.create({
       url: `${PUBLIC_URL}/twiml`,
@@ -139,17 +91,35 @@ callRouter.get("/", async (req, res) => {
       from: TWILIO_CALLER_NUMBER,
     });
 
-    logger.info("전화 연결 시작:", call.sid);
+    logger.info(`전화 연결 시작, CallSid: ${call.sid}`);
     res.json({ success: true, sid: call.sid });
   } catch (err) {
     logger.error("전화 실패:", err);
     res.status(500).json({ success: false, error: String(err) });
   }
 });
-app.use("/call", callRouter);
+
+// const callRouter = Router();
+
+// mainRouter.get("/", async (req, res) => {
+//   try {
+//     const call = await twilioClient.calls.create({
+//       url: `${PUBLIC_URL}/twiml`,
+//       to: TWILIO_RECIPIENT_NUMBER,
+//       from: TWILIO_CALLER_NUMBER,
+//     });
+//
+//     logger.info("전화 연결 시작:", call.sid);
+//     res.json({ success: true, sid: call.sid });
+//   } catch (err) {
+//     logger.error("전화 실패:", err);
+//     res.status(500).json({ success: false, error: String(err) });
+//   }
+// });
+app.use("/call", mainRouter);
 
 // 웹훅 전송 테스트 엔드포인트
-app.get("/test-webhook", async (req, res) => {
+mainRouter.get("/test-webhook", async (req, res) => {
   const testData = {
     mindStatus: "GOOD",
     sleepTimes: 7,
@@ -170,9 +140,10 @@ app.get("/test-webhook", async (req, res) => {
       }
     ]
   };
+  const testSessionId = "test-session-12345"; // 테스트용 세션 ID
 
   try {
-    await sendToWebhook(testData);
+    await sendToWebhook(testData, WEBHOOK_URL, testSessionId);
     logger.info("테스트 웹훅 전송 완료");
     res.json({ 
       success: true, 
@@ -185,6 +156,39 @@ app.get("/test-webhook", async (req, res) => {
       success: false, 
       error: String(error) 
     });
+  }
+});
+
+wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
+  try {
+    const url = new URL(req.url || "", `http://${req.headers.host}`);
+    // 예: /call/CA123... 또는 /logs/CA123...
+    const parts = url.pathname.split("/").filter(Boolean);
+
+    if (parts.length < 2) {
+      logger.error("WS 연결 URL이 올바르지 않습니다 (세션 ID 누락):", req.url);
+      ws.close();
+      return;
+    }
+
+    const type = parts[0];      // "call" 또는 "logs"
+    const sessionId = parts[1]; // Twilio의 CallSid
+
+    logger.info(`WS 새 연결: type=${type}, sessionId=${sessionId}`);
+
+    if (type === "call") {
+      callConnections.set(sessionId, ws); // 메모리의 연결 맵에 추가
+      handleCallConnection(ws, sessionId, OPENAI_API_KEY, WEBHOOK_URL);
+    } else if (type === "logs") {
+      frontendConnections.set(sessionId, ws); // 모니터링 연결도 세션 ID 기반으로 관리
+      handleFrontendConnection(ws, sessionId);
+    } else {
+      logger.error(`WS 알 수 없는 연결 type: ${type}`);
+      ws.close();
+    }
+  } catch (err) {
+    logger.error("WS connection 핸들러에서 예외 발생:", err);
+    ws.close();
   }
 });
 
