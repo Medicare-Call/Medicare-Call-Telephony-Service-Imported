@@ -86,7 +86,7 @@ mainRouter.post("/twiml", (req,res) => {
 mainRouter.get("/call", async (req, res) => {
   try {
     const call = await twilioClient.calls.create({
-      url: `${PUBLIC_URL}/twiml`,
+      url: `${PUBLIC_URL}/call/twiml`,
       to: TWILIO_RECIPIENT_NUMBER,
       from: TWILIO_CALLER_NUMBER,
     });
