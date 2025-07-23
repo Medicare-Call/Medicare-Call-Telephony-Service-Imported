@@ -40,6 +40,8 @@ jobs:
             TWILIO_AUTH_TOKEN="${{ secrets.TWILIO_AUTH_TOKEN }}"
             TWILIO_CALLER_NUMBER="${{ secrets.TWILIO_CALLER_NUMBER }}"
             TWILIO_RECIPIENT_NUMBER="${{ secrets.TWILIO_RECIPIENT_NUMBER }}"
+            REDIS_HOST="${{ secrets.REDIS_HOST }}"
+            REDIS_PORT="${{ secrets.REDIS_PORT }}"
 
             echo "Stopping existing container"
             sudo docker stop medicare-node || true
@@ -62,6 +64,8 @@ jobs:
             -e TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN} \
             -e TWILIO_CALLER_NUMBER=${TWILIO_CALLER_NUMBER} \
             -e TWILIO_RECIPIENT_NUMBER=${TWILIO_RECIPIENT_NUMBER} \
+            -e REDIS_HOST=${REDIS_HOST} \
+            -e REDIS_PORT=${REDIS_PORT} \
             ${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}
 
             echo "Cleaning up old images"
