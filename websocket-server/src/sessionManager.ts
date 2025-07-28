@@ -1,8 +1,8 @@
 import { RawData, WebSocket } from 'ws';
 
 interface Session {
-    sessionId: string; // 이제 CallSid가 됨
-    callSid: string; // CallSid 명시적 저장
+    sessionId: string;
+    callSid: string;
     elderId?: string;
     prompt?: string;
     twilioConn?: WebSocket;
@@ -42,7 +42,7 @@ function createSession(
     };
 
     sessions.set(callSid, session);
-    console.log(`📞 새 세션 생성: ${callSid} (CallSid 사용, elderId: ${config.elderId || 'N/A'})`);
+    console.log(`새 세션 생성: ${callSid} (CallSid 사용, elderId: ${config.elderId || 'N/A'})`);
     return session;
 }
 
@@ -58,11 +58,11 @@ export function handleCallConnection(
     const sessionId = callSid || `fallback_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     if (!callSid) {
-        console.warn(`⚠️ CallSid가 제공되지 않음. 폴백 ID 사용: ${sessionId}`);
+        console.warn(`CallSid가 제공되지 않음. 폴백 ID 사용: ${sessionId}`);
     }
 
     if (!elderId) {
-        console.error(`❌ elderId가 필수입니다. sessionId: ${sessionId}`);
+        console.error(`elderId는 필수입니다. sessionId: ${sessionId}`);
         ws.close();
         return sessionId;
     }
@@ -81,13 +81,11 @@ export function handleCallConnection(
     ws.on('error', () => ws.close());
     ws.on('close', () => closeAllConnections(sessionId));
 
-    console.log(
-        `✅ 세션 생성 완료 - CallSid: ${sessionId}, elderId: ${elderId}, prompt: ${prompt ? '설정됨' : '없음'}`
-    );
+    console.log(`세션 생성 완료 - CallSid: ${sessionId}, elderId: ${elderId}, prompt: ${prompt ? '설정됨' : '없음'}`);
     return sessionId;
 }
 
-// === 실시간 대화 처리 (필수) ===
+// === 실시간 대화 처리  ===
 function handleTwilioMessage(sessionId: string, data: RawData): void {
     const session = getSession(sessionId);
     if (!session) return;
@@ -97,7 +95,7 @@ function handleTwilioMessage(sessionId: string, data: RawData): void {
 
     // media 이벤트가 아닌 경우만 로그 출력
     if (msg.event !== 'media') {
-        console.log('📞 Twilio 메시지:', msg.event, `(CallSid: ${session.callSid})`);
+        console.log('Twilio 메시지:', msg.event, `(CallSid: ${session.callSid})`);
     }
 
     switch (msg.event) {
@@ -126,7 +124,7 @@ function handleTwilioMessage(sessionId: string, data: RawData): void {
 
         case 'stop':
         case 'close':
-            console.log(`📞 통화 종료 신호 수신 (CallSid: ${session.callSid})`);
+            console.log(`통화 종료 신호 수신 (CallSid: ${session.callSid})`);
             closeAllConnections(sessionId);
             break;
     }
@@ -141,7 +139,7 @@ function connectToOpenAI(sessionId: string): void {
 
     if (isOpen(session.modelConn)) return; // 이미 연결됨
 
-    console.log(`🔗 OpenAI 연결 중... (CallSid: ${session.callSid})`);
+    console.log(`OpenAI 연결 중... (CallSid: ${session.callSid})`);
 
     session.modelConn = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03', {
         headers: {
@@ -150,9 +148,8 @@ function connectToOpenAI(sessionId: string): void {
         },
     });
 
-    // OpenAI 연결 성공
     session.modelConn.on('open', () => {
-        console.log(`✅ OpenAI 연결 완료 (CallSid: ${session.callSid})`);
+        console.log(`OpenAI 연결 완료 (CallSid: ${session.callSid})`);
 
         // 세션 설정
         const sessionConfig = {
@@ -175,7 +172,7 @@ function connectToOpenAI(sessionId: string): void {
 
         jsonSend(session.modelConn, sessionConfig);
 
-        // 초기 프롬프트 전송
+        // 프롬프트 전송
         if (session.prompt) {
             sendUserMessage(sessionId, session.prompt);
         }
@@ -184,13 +181,12 @@ function connectToOpenAI(sessionId: string): void {
     // OpenAI 메시지 처리
     session.modelConn.on('message', (data) => handleOpenAIMessage(sessionId, data));
 
-    // 연결 오류 처리
     session.modelConn.on('error', (error) => {
-        console.error(`❌ OpenAI 연결 오류 (CallSid: ${session.callSid}):`, error);
+        console.error(`OpenAI 연결 오류 (CallSid: ${session.callSid}):`, error);
     });
 
     session.modelConn.on('close', () => {
-        console.log(`🔌 OpenAI 연결 종료 (CallSid: ${session.callSid})`);
+        console.log(`OpenAI 연결 종료 (CallSid: ${session.callSid})`);
     });
 }
 
@@ -264,14 +260,11 @@ function handleOpenAIMessage(sessionId: string, data: RawData): void {
                         }
 
                         if (aiResponse) {
-                            console.log(`🤖 AI (CallSid: ${session.callSid}):`, aiResponse);
+                            console.log(`AI (CallSid: ${session.callSid}):`, aiResponse);
                             session.conversationHistory.push({
                                 is_elderly: false,
                                 conversation: aiResponse,
                             });
-                            console.log(
-                                `📊 대화 기록 (CallSid: ${session.callSid}): ${session.conversationHistory.length}개`
-                            );
                         }
                     }
                 }
@@ -281,14 +274,11 @@ function handleOpenAIMessage(sessionId: string, data: RawData): void {
         case 'conversation.item.input_audio_transcription.completed':
             // 사용자 음성 인식 완료 - 텍스트 저장
             if (event.transcript) {
-                console.log(`👤 사용자 (CallSid: ${session.callSid}):`, event.transcript);
+                console.log(`사용자 (CallSid: ${session.callSid}):`, event.transcript);
                 session.conversationHistory.push({
                     is_elderly: true,
                     conversation: event.transcript,
                 });
-                console.log(
-                    `💾 사용자 응답 저장 (CallSid: ${session.callSid}) - 총 ${session.conversationHistory.length}개`
-                );
             }
             break;
     }
@@ -338,13 +328,13 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
 
     const formattedData = {
         sessionId,
-        callSid: session?.callSid, // CallSid 추가
+        callSid: session?.callSid,
         elderId: session?.elderId,
         content: conversationHistory,
     };
 
-    console.log(`🌐 웹훅 전송 (CallSid: ${session?.callSid}):`, webhookUrl);
-    console.log(`📦 웹훅 전송 데이터:`, JSON.stringify(formattedData, null, 2));
+    console.log(`웹훅 전송 (CallSid: ${session?.callSid}):`, webhookUrl);
+    console.log(`웹훅 전송 데이터:`, JSON.stringify(formattedData, null, 2));
 
     try {
         const response = await fetch(webhookUrl, {
@@ -354,35 +344,35 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
         });
 
         if (response.ok) {
-            console.log(`✅ 웹훅 전송 성공 (CallSid: ${session?.callSid})`);
+            console.log(`웹훅 전송 성공 (CallSid: ${session?.callSid})`);
         } else {
-            console.error(`❌ 웹훅 전송 실패 (CallSid: ${session?.callSid}):`, response.status);
+            console.error(`웹훅 전송 실패 (CallSid: ${session?.callSid}):`, response.status);
         }
     } catch (error) {
-        console.error(`❌ 웹훅 오류 (CallSid: ${session?.callSid}):`, error);
+        console.error(`웹훅 전송 오류 (CallSid: ${session?.callSid}):`, error);
     }
 }
 
-// === 🏁 통화 종료 처리 (필수) ===
+// === 통화 종료 처리 ===
 function closeAllConnections(sessionId: string): void {
     const session = getSession(sessionId);
     if (!session) return;
 
-    console.log(`🔌 세션 종료 처리 (CallSid: ${session.callSid})...`);
-    console.log(`📊 대화 기록: ${session.conversationHistory?.length || 0}개`);
+    console.log(`세션 종료 처리 (CallSid: ${session.callSid})...`);
+    console.log(`대화 기록: ${session.conversationHistory?.length || 0}개`);
 
     // 웹훅 전송 (비동기)
     const sendWebhookPromise = async () => {
         if (session.conversationHistory && session.conversationHistory.length > 0) {
-            console.log(`📤 대화 기록 웹훅 전송 중 (CallSid: ${session.callSid})...`);
+            console.log(`대화 기록 웹훅 전송 중 (CallSid: ${session.callSid})...`);
             try {
                 await sendToWebhook(sessionId, session.conversationHistory);
-                console.log(`✅ 웹훅 전송 완료 (CallSid: ${session.callSid})`);
+                console.log(`웹훅 전송 완료 (CallSid: ${session.callSid})`);
             } catch (error) {
-                console.error(`❌ 웹훅 전송 실패 (CallSid: ${session.callSid}):`, error);
+                console.error(`웹훅 전송 실패 (CallSid: ${session.callSid}):`, error);
             }
         } else {
-            console.log(`❌ 전송할 대화 기록 없음 (CallSid: ${session.callSid})`);
+            console.log(`전송할 대화 기록 없음 (CallSid: ${session.callSid})`);
         }
     };
 
@@ -400,11 +390,11 @@ function closeAllConnections(sessionId: string): void {
 
         // 세션 삭제
         sessions.delete(sessionId);
-        console.log(`🧹 세션 정리 완료 (CallSid: ${session.callSid})`);
+        console.log(`세션 정리 완료 (CallSid: ${session.callSid})`);
     });
 }
 
-// === 🛠️ 유틸리티 함수들 ===
+// === 유틸리티 함수들 ===
 function parseMessage(data: RawData): any {
     try {
         return JSON.parse(data.toString());
@@ -422,7 +412,7 @@ function isOpen(ws?: WebSocket): ws is WebSocket {
     return !!ws && ws.readyState === WebSocket.OPEN;
 }
 
-// === 📊 상태 조회 함수들 ===
+// === 상태 조회 함수들 ===
 export function getSessionStatus(sessionId: string) {
     const session = getSession(sessionId);
     if (!session) {
@@ -432,7 +422,7 @@ export function getSessionStatus(sessionId: string) {
     return {
         exists: true,
         sessionId: session.sessionId,
-        callSid: session.callSid, // CallSid 추가
+        callSid: session.callSid,
         elderId: session.elderId,
         conversationCount: session.conversationHistory.length,
         isActive: isOpen(session.twilioConn) && isOpen(session.modelConn),
@@ -444,7 +434,7 @@ export function getAllActiveSessions() {
         totalSessions: sessions.size,
         activeSessions: Array.from(sessions.values()).map((session) => ({
             sessionId: session.sessionId,
-            callSid: session.callSid, // CallSid 추가
+            callSid: session.callSid,
             elderId: session.elderId,
             conversationCount: session.conversationHistory.length,
             isActive: isOpen(session.twilioConn) && isOpen(session.modelConn),

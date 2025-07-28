@@ -25,13 +25,49 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID!;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN!;
-const TWILIO_CALLER_NUMBER = process.env.TWILIO_CALLER_NUMBER!;
 const TWILIO_RECIPIENT_NUMBER = process.env.TWILIO_RECIPIENT_NUMBER!;
+
+// 여러 개의 발신 번호 관리
+const TWILIO_CALLER_NUMBERS = process.env.TWILIO_CALLER_NUMBERS?.split(',').map((num) => num.trim()) || [];
+if (TWILIO_CALLER_NUMBERS.length === 0) {
+    logger.error('TWILIO_CALLER_NUMBERS environment variable is required (comma-separated)');
+    process.exit(1);
+}
+
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 if (!OPENAI_API_KEY) {
     logger.error('OPENAI_API_KEY environment variable is required');
     process.exit(1);
+}
+
+// 사용 중인 발신 번호 추적
+const activeCallerNumbers = new Set<string>();
+
+// 사용 가능한 발신 번호 선택 함수
+function getAvailableCallerNumber(): string | null {
+    for (const number of TWILIO_CALLER_NUMBERS) {
+        if (!activeCallerNumbers.has(number)) {
+            return number;
+        }
+    }
+    return null; // 모든 번호가 사용 중
+}
+
+// 발신 번호 사용 시작
+function startUsingCallerNumber(number: string): void {
+    activeCallerNumbers.add(number);
+    logger.info(
+        `발신 번호 사용 시작: ${number} (사용 중: ${activeCallerNumbers.size}/${TWILIO_CALLER_NUMBERS.length})`
+    );
+}
+
+// 발신 번호 사용 종료
+function stopUsingCallerNumber(number: string): void {
+    activeCallerNumbers.delete(number);
+    logger.info(
+        `발신 번호 사용 종료: ${number} (사용 중: ${activeCallerNumbers.size}/${TWILIO_CALLER_NUMBERS.length})`
+    );
 }
 
 const app = express();
@@ -46,6 +82,9 @@ export const callConnections = new Map<string, WebSocket>();
 export const modelConnections = new Map<string, WebSocket>();
 export const frontendConnections = new Map<string, WebSocket>();
 
+// CallSid와 사용 중인 발신 번호 매핑
+export const callToCallerNumber = new Map<string, string>();
+
 const twimlPath = join(__dirname, 'twiml.xml');
 const twimlTemplate = readFileSync(twimlPath, 'utf-8');
 
@@ -55,10 +94,6 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
     const callSid = req.body.CallSid;
     const elderId = req.query.elderId as string;
     const prompt = req.query.prompt ? decodeURIComponent(req.query.prompt as string) : undefined;
-    // server.ts에서 확인
-    const twimlPath = join(__dirname, 'twiml.xml');
-    console.log('📁 TwiML 파일 경로:', twimlPath);
-    console.log('📄 TwiML 내용:', readFileSync(twimlPath, 'utf-8'));
 
     if (!callSid) {
         res.status(400).send('CallSid is required');
@@ -76,7 +111,6 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
     wsUrl.pathname = `/call/${callSid}/${elderId}`;
     if (prompt) wsUrl.searchParams.set('prompt', prompt);
 
-    // & → &amp; 변환!
     const twimlContent = twimlTemplate.replace('{{WS_URL}}', wsUrl.toString().replace(/&/g, '&amp;'));
     res.set('Content-Type', 'text/xml; charset=utf-8').send(twimlContent);
 });
@@ -96,41 +130,78 @@ mainRouter.post('/call', async (req: Request, res: Response) => {
             return;
         }
 
+        // 사용 가능한 발신 번호 선택
+        const availableCallerNumber = getAvailableCallerNumber();
+        if (!availableCallerNumber) {
+            logger.error('모든 발신 번호가 사용 중입니다');
+            res.status(503).json({
+                success: false,
+                error: '모든 발신 번호가 사용 중입니다. 잠시 후 다시 시도해주세요.',
+                availableNumbers: TWILIO_CALLER_NUMBERS.length,
+                activeCalls: activeCallerNumbers.size,
+            });
+            return;
+        }
+
         const twimlUrl = new URL(`${PUBLIC_URL}/call/twiml`);
         twimlUrl.searchParams.set('elderId', elderId);
         if (prompt) {
             twimlUrl.searchParams.set('prompt', encodeURIComponent(prompt));
         }
 
-        logger.info(`🔍 생성된 TwiML URL: ${twimlUrl.toString()}`);
-        logger.info(`🔍 PUBLIC_URL: ${PUBLIC_URL}`);
-        logger.info(`🔍 전화 생성 파라미터:`, {
+        logger.info(`전화 생성 파라미터:`, {
             url: twimlUrl.toString(),
             to: phoneNumber || TWILIO_RECIPIENT_NUMBER,
-            from: TWILIO_CALLER_NUMBER,
+            from: availableCallerNumber,
         });
 
         const call = await twilioClient.calls.create({
             url: twimlUrl.toString(),
             to: phoneNumber || TWILIO_RECIPIENT_NUMBER,
-            from: TWILIO_CALLER_NUMBER,
+            from: availableCallerNumber,
         });
 
-        logger.info(`전화 연결 시작 - CallSid: ${call.sid}, elderId: ${elderId}`);
-        res.json({ success: true, sid: call.sid, elderId, prompt: prompt || null });
+        // 발신 번호 사용 시작 및 CallSid와 매핑
+        startUsingCallerNumber(availableCallerNumber);
+        callToCallerNumber.set(call.sid, availableCallerNumber);
+
+        logger.info(`전화 연결 시작 - CallSid: ${call.sid}, elderId: ${elderId}, 발신번호: ${availableCallerNumber}`);
+        res.json({
+            success: true,
+            sid: call.sid,
+            elderId,
+            prompt: prompt || null,
+            callerNumber: availableCallerNumber,
+            availableNumbers: TWILIO_CALLER_NUMBERS.length - activeCallerNumbers.size,
+        });
     } catch (err) {
         logger.error('전화 실패:', err);
         res.status(500).json({ success: false, error: String(err) });
     }
 });
 
+// 발신 번호 상태 조회 엔드포인트
+mainRouter.get('/caller-numbers/status', (req: Request, res: Response) => {
+    const status = {
+        totalNumbers: TWILIO_CALLER_NUMBERS.length,
+        activeNumbers: activeCallerNumbers.size,
+        availableNumbers: TWILIO_CALLER_NUMBERS.length - activeCallerNumbers.size,
+        callerNumbers: TWILIO_CALLER_NUMBERS.map((number) => ({
+            number,
+            isActive: activeCallerNumbers.has(number),
+        })),
+        activeCalls: Array.from(callToCallerNumber.entries()).map(([callSid, number]) => ({
+            callSid,
+            callerNumber: number,
+        })),
+    };
+
+    res.json(status);
+});
+
 app.use('/call', mainRouter);
 
 wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-    logger.info(`🔌 새로운 WebSocket 연결 시도!`);
-    logger.info(`🔍 Request URL: ${req.url}`);
-    logger.info(`🔍 Request Headers:`, JSON.stringify(req.headers, null, 2));
-
     try {
         const url = new URL(req.url || '', `http://${req.headers.host}`);
         const parts = url.pathname.split('/').filter(Boolean);
@@ -144,7 +215,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         // parts[0] = 'call', parts[1] = callSid, parts[2] = elderId
         const type = parts[0];
         const sessionId = parts[1];
-        const elderId = parts[2]; // 이렇게!
+        const elderId = parts[2];
         const prompt = url.searchParams.get('prompt') ? decodeURIComponent(url.searchParams.get('prompt')!) : undefined;
 
         if (!elderId) {
@@ -159,6 +230,17 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
         if (type === 'call') {
             callConnections.set(sessionId, ws);
+
+            // WebSocket 연결 종료 시 발신 번호 해제
+            ws.on('close', () => {
+                const callerNumber = callToCallerNumber.get(sessionId);
+                if (callerNumber) {
+                    stopUsingCallerNumber(callerNumber);
+                    callToCallerNumber.delete(sessionId);
+                    logger.info(`CallSid ${sessionId}의 발신 번호 ${callerNumber} 해제`);
+                }
+            });
+
             handleCallConnection(ws, OPENAI_API_KEY, WEBHOOK_URL, elderId, prompt, sessionId);
         } else if (type === 'logs') {
             frontendConnections.set(sessionId, ws);
@@ -174,4 +256,6 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
 server.listen(PORT, () => {
     logger.info(`Server running on http://localhost:${PORT}`);
+    logger.info(`등록된 발신 번호: ${TWILIO_CALLER_NUMBERS.join(', ')}`);
+    logger.info(`총 발신 번호 개수: ${TWILIO_CALLER_NUMBERS.length}`);
 });
