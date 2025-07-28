@@ -1,661 +1,453 @@
-import { RawData, WebSocket } from "ws";
-import winston from "winston";
-import redisClient, {SESSION_TTL} from "./redisClient";
-import {callConnections, frontendConnections, modelConnections} from "./server";
-
-const logger = winston.createLogger({
-  level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.simple()
-  ),
-  transports: [
-    new winston.transports.Console(),
-    // 필요시 파일 저장도 추가 가능
-    // new winston.transports.File({ filename: 'combined.log' })
-  ]
-});
+import { RawData, WebSocket } from 'ws';
 
 interface Session {
-  twilioConn?: WebSocket;
-  frontendConn?: WebSocket;
-  modelConn?: WebSocket;
-  streamSid?: string;
-  saved_config?: any;
-  lastAssistantItem?: string;
-  responseStartTimestamp?: number;
-  latestMediaTimestamp?: number;
-  openAIApiKey?: string;
-  webhookUrl?: string;
-  conversationData?: any;
-  isConversationComplete?: boolean;
-  conversationStep?: number;
-  conversationHistory?: { is_elderly: boolean; conversation: string }[];
-}
-const INITIAL_PROMPT = `
-당신은 고령자를 위한 따뜻하고 친절한 AI 전화 상담원입니다.
-
-**역할**: 고령 어르신과 자연스러운 전화 상담을 진행하세요.
-
-**대화 목표**: 다음 3가지 주제에 대해 자연스럽게 대화하세요
-1. 수면 상태 (어젯밤 잠은 몇시간 정도 주무셨는지)
-2. 기분 상태 (오늘 하루 기분이 어떠신지)  
-3. 건강 상태 (몸 어디 편찮은 곳은 없는지)
-
-**대화 스타일**:
-- 매번 어르신의 답변에 먼저 공감하고 적절히 반응하세요
-- 그 다음에 자연스럽게 다음 질문으로 이어가세요
-- 건강 문제가 있으면 간단한 조언을 해주세요
-- 따뜻하고 친근한 톤으로 대화하세요
-
-**중요**: 사용자의 실제 응답을 정확히 듣고 그 내용에 맞게 반응하세요. 아래 예시는 대화 흐름 참고용이며, 실제 대화에서는 사용자가 말한 구체적인 내용에 맞춰 대화하세요.
-
-**대화 흐름 예시**:
-AI: "안녕하세요, 어르신! 오늘 간단한 안부 인사를 드리려고 전화드렸어요."
-어르신: [인사 응답 - 예: "네 안녕하세요", "네 그래요", "안녕하세요" 등]
-AI: [간단한 응답 확인 후 바로 첫 번째 질문] "어르신 어젯밤 잠은 몇시간 정도 주무셨어요?"
-어르신: [수면 시간 응답 - 예: "6시간", "잘 못잤어요", "푹 잤어요" 등]
-AI: [수면 응답에 대한 적절한 공감] + "그럼 오늘 하루 기분은 어떠셨어요?"
-어르신: [기분 상태 응답 - 예: "좋았어요", "우울해요", "그냥 그래요" 등]  
-AI: [기분 응답에 대한 적절한 공감] + "혹시 몸 어디 편찮으신 데는 없으세요?"
-어르신: [건강 상태 응답 - 예: "무릎 아파요", "감기 기운", "괜찮아요" 등]
-AI: [사용자가 말한 구체적인 건강 상태에 맞는 조언과 공감] + 따뜻한 마무리 인사
-
-**핵심 원칙**: 
-- 어르신이 실제로 말씀하신 내용(수면시간, 기분상태, 건강문제)을 정확히 반영해서 대화하세요
-- 예시의 구체적인 내용을 그대로 사용하지 말고, 사용자의 실제 답변에 맞춰 반응하세요
-- 3가지 주제를 모두 다룬 후 따뜻하게 마무리하세요
-
-지금 첫 번째 인사를 해주세요.
-`;
-
-
-// --- Redis와 상호작용하는 헬퍼 함수 ---
-async function getSession(sessionId: string): Promise<Session> {
-  const sessionData = await redisClient.get(`session:${sessionId}`);
-  return sessionData ? JSON.parse(sessionData) : {};
-}
-async function saveSession(sessionId: string, sessionData: Session) {
-  await redisClient.set(`session:${sessionId}`, JSON.stringify(sessionData), {
-    EX: SESSION_TTL,
-  });
-}
-async function deleteSession(sessionId: string) {
-  await redisClient.del(`session:${sessionId}`);
+    sessionId: string; // 이제 CallSid가 됨
+    callSid: string; // CallSid 명시적 저장
+    elderId?: string;
+    prompt?: string;
+    twilioConn?: WebSocket;
+    modelConn?: WebSocket;
+    streamSid?: string;
+    lastAssistantItem?: string;
+    responseStartTimestamp?: number;
+    latestMediaTimestamp?: number;
+    openAIApiKey: string;
+    webhookUrl?: string;
+    conversationHistory: { is_elderly: boolean; conversation: string }[];
 }
 
+let sessions: Map<string, Session> = new Map();
 
-// 최종 응답 JSON을 웹훅 URL로 전송하는 함수
-export async function sendToWebhook(data: any, webhookUrl: string, sessionId: string) {
-  if (!webhookUrl) {
-    logger.info(`(Session: ${sessionId}) - Webhook URL이 설정되지 않아 전송을 건너뜁니다.`);
-    return;
-  }
-  const formattedData = {
-    content: data,
-    sessionId: sessionId // 데이터에 세션 ID 포함
-  };
+function getSession(sessionId: string): Session | undefined {
+    return sessions.get(sessionId);
+}
 
-  logger.info(`(Session: ${sessionId}) 🌐 Sending to webhook:`, webhookUrl);
-  logger.info(`(Session: ${sessionId}) 📦 Webhook data:`, JSON.stringify(formattedData, null, 2));
+function createSession(
+    callSid: string,
+    config: {
+        openAIApiKey: string;
+        elderId?: string;
+        prompt?: string;
+        webhookUrl?: string;
+    }
+): Session {
+    const session: Session = {
+        sessionId: callSid, // sessionId = callSid
+        callSid: callSid, // CallSid 명시적 저장
+        elderId: config.elderId,
+        prompt: config.prompt,
+        openAIApiKey: config.openAIApiKey,
+        webhookUrl: config.webhookUrl,
+        conversationHistory: [],
+    };
 
-  try {
-    const response = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(formattedData),
+    sessions.set(callSid, session);
+    console.log(`📞 새 세션 생성: ${callSid} (CallSid 사용, elderId: ${config.elderId || 'N/A'})`);
+    return session;
+}
+
+// === 📞 전화 연결 처리 함수 ===
+export function handleCallConnection(
+    ws: WebSocket,
+    openAIApiKey: string,
+    webhookUrl?: string,
+    elderId?: string,
+    prompt?: string,
+    callSid?: string
+): string {
+    const sessionId = callSid || `fallback_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    if (!callSid) {
+        console.warn(`⚠️ CallSid가 제공되지 않음. 폴백 ID 사용: ${sessionId}`);
+    }
+
+    if (!elderId) {
+        console.error(`❌ elderId가 필수입니다. sessionId: ${sessionId}`);
+        ws.close();
+        return sessionId;
+    }
+
+    // 세션 생성 시 elderId와 prompt 포함
+    const session = createSession(sessionId, {
+        openAIApiKey,
+        elderId,
+        prompt,
+        webhookUrl,
     });
 
-    if (response.ok) {
-      logger.info(`(Session: ${sessionId}) ✅ Successfully sent data to webhook:`, webhookUrl);
-    } else {
-      logger.error(`(Session: ${sessionId}) ❌ Failed to send data to webhook:`, response.status, response.statusText);
+    session.twilioConn = ws;
+
+    ws.on('message', (data) => handleTwilioMessage(sessionId, data));
+    ws.on('error', () => ws.close());
+    ws.on('close', () => closeAllConnections(sessionId));
+
+    console.log(
+        `✅ 세션 생성 완료 - CallSid: ${sessionId}, elderId: ${elderId}, prompt: ${prompt ? '설정됨' : '없음'}`
+    );
+    return sessionId;
+}
+
+// === 실시간 대화 처리 (필수) ===
+function handleTwilioMessage(sessionId: string, data: RawData): void {
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    const msg = parseMessage(data);
+    if (!msg) return;
+
+    // media 이벤트가 아닌 경우만 로그 출력
+    if (msg.event !== 'media') {
+        console.log('📞 Twilio 메시지:', msg.event, `(CallSid: ${session.callSid})`);
     }
-  } catch (error) {
-    logger.error(`(Session: ${sessionId}) ❌ Error sending data to webhook:`, error);
-  }
-}
 
-// 테스트용 웹훅 전송 함수
-export async function sendTestWebhook(sessionId: string, webhookUrl?: string, testData?: any) {
-  let targetUrl = webhookUrl;
+    switch (msg.event) {
+        case 'start':
+            console.log(`📞 통화 시작 (CallSid: ${session.callSid}), streamSid: ${msg.start.streamSid}`);
+            session.streamSid = msg.start.streamSid;
+            session.latestMediaTimestamp = 0;
+            session.lastAssistantItem = undefined;
+            session.responseStartTimestamp = undefined;
 
-  if (!targetUrl) {
-    targetUrl = process.env.WEBHOOK_URL;
-  }
+            // OpenAI 연결 시도
+            connectToOpenAI(sessionId);
+            break;
 
-  if (!targetUrl) {
-    logger.info(`(Session: ${sessionId}) ❌ 테스트 웹훅 전송 불가: Webhook URL이 설정되지 않았습니다.`);
-    return { success: false, error: "No webhook URL configured" };
-  }
+        case 'media':
+            // 실시간 음성 데이터를 OpenAI로 전달
+            session.latestMediaTimestamp = msg.media.timestamp;
 
-  const defaultTestData = [
-    {
-      "is_elderly": false,
-      "conversation": "안녕하세요, 어르신! 오늘 간단한 안부 인사를 드리려고 전화드렸어요."
-    },
-    {
-      "is_elderly": true,
-      "conversation": "네 안녕하세요"
-    },
-    {
-      "is_elderly": false,
-      "conversation": "어르신 어젯밤 잠은 몇시간 정도 주무셨어요?"
-    },
-    {
-      "is_elderly": true,
-      "conversation": "음 7시간정도 잤네요"
-    },
-    {
-      "is_elderly": false,
-      "conversation": "아 7시간정도 잘 주무셨군요! 충분히 주무신 것 같아서 다행이네요. 그럼 오늘 하루 기분은 어떠셨어요?"
-    },
-    {
-      "is_elderly": true,
-      "conversation": "오늘 기분이 좋았어요"
-    },
-    {
-      "is_elderly": false,
-      "conversation": "기분 좋으시다니 정말 다행이에요! 좋은 일이 있으셨나봐요. 그런데 혹시 몸 어디 편찮으신 데는 없으세요?"
-    },
-    {
-      "is_elderly": true,
-      "conversation": "무릎이 좀 아파요"
-    },
-    {
-      "is_elderly": false,
-      "conversation": "아 무릎이 아프시는군요. 날씨가 추워져서 그럴 수도 있어요. 따뜻하게 찜질해주시고 무리하지 마세요. 네 알겠습니다 내일또 연락드릴게요 좋은하루 보내세요!"
+            if (isOpen(session.modelConn)) {
+                jsonSend(session.modelConn, {
+                    type: 'input_audio_buffer.append',
+                    audio: msg.media.payload,
+                });
+            }
+            break;
+
+        case 'stop':
+        case 'close':
+            console.log(`📞 통화 종료 신호 수신 (CallSid: ${session.callSid})`);
+            closeAllConnections(sessionId);
+            break;
     }
-  ];
-  const dataToSend = testData || defaultTestData;
+}
 
-  const formattedData = {
-    content: dataToSend,
-    test: true,
-    timestamp: new Date().toISOString(),
-    sessionId: sessionId,
-  };
-
-  logger.info(`(Session: ${sessionId}) 🧪 Sending TEST webhook to:`, targetUrl);
-
-  try {
-    const response = await fetch(targetUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(formattedData),
-    });
-
-    if (response.ok) {
-      return { success: true, message: "Test webhook sent successfully" };
-    } else {
-      return { success: false, error: `HTTP ${response.status}: ${response.statusText}` };
+// === OpenAI 연결 함수 ===
+function connectToOpenAI(sessionId: string): void {
+    const session = getSession(sessionId);
+    if (!session || !session.twilioConn || !session.streamSid || !session.openAIApiKey) {
+        return;
     }
-  } catch (error) {
-    return { success: false, error: (error as Error).message };
-  }
-}
 
-// AI 응답에서 최종 JSON을 감지하고 추출하는 함수: 현재 쓰이지 않는 것 같지만 일단 삭제하지 않음
-function extractFinalJson(text: string): any | null {
-  logger.info("🔍 Trying to extract JSON from text length:", text.length);
-  
-  try {
-    // 더 유연한 JSON 패턴들을 순서대로 시도
-    const patterns = [
-      // 원래 패턴 (모든 필드 포함)
-      /\{[\s\S]*"mindStatus"[\s\S]*"sleepTimes"[\s\S]*"healthStatus"[\s\S]*"summary"[\s\S]*"content"[\s\S]*\}/,
-      // mindStatus만 포함된 JSON
-      /\{[\s\S]*"mindStatus"[\s\S]*\}/,
-      // 아무 JSON이나
-      /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/
-    ];
-    
-    for (let i = 0; i < patterns.length; i++) {
-      const pattern = patterns[i];
-      const match = text.match(pattern);
-      
-      if (match) {
-        logger.info(`🎯 Pattern ${i + 1} matched:`, match[0].substring(0, 200) + "...");
-        try {
-          const jsonStr = match[0];
-          const parsed = JSON.parse(jsonStr);
-          
-          // mindStatus, sleepTimes, healthStatus 중 하나라도 있으면 유효한 JSON으로 간주
-          if (parsed.mindStatus || parsed.sleepTimes !== undefined || parsed.healthStatus) {
-            logger.info("✅ Valid conversation JSON found");
-            return parsed;
-          } else {
-            logger.info("❌ JSON found but missing required fields");
-          }
-        } catch (parseError) {
-          logger.info(`❌ Pattern ${i + 1} matched but JSON parsing failed:`, parseError);
-        }
-      }
-    }
-    
-    logger.info("❌ No valid JSON pattern found");
-    return null;
-  } catch (error) {
-    logger.error('❌ Error in extractFinalJson:', error);
-    return null;
-  }
-}
+    if (isOpen(session.modelConn)) return; // 이미 연결됨
 
-export async function handleCallConnection(ws: WebSocket, sessionId: string, openAIApiKey: string, webhookUrl?: string) {
-  // 새로운 세션을 생성하고 Redis에 저장
-  const newSession: Session = {
-    openAIApiKey,
-    webhookUrl,
-    conversationHistory: [],
-  };
-  await saveSession(sessionId, newSession);
-  logger.info(`Call connection established for session: ${sessionId}`);
+    console.log(`🔗 OpenAI 연결 중... (CallSid: ${session.callSid})`);
 
-  ws.on("message", (data) => handleTwilioMessage(data, sessionId));
-  ws.on("error", (err) => {
-    logger.error(`Twilio WS Error for session ${sessionId}:`, err);
-    ws.close();
-  });
-  ws.on("close", () => {
-    logger.info(`Twilio WS connection closed for session: ${sessionId}`);
-    callConnections.delete(sessionId);
-    closeAllConnections(sessionId);
-  });
-}
-
-//모니터링용
-export function handleFrontendConnection(ws: WebSocket, sessionId: string) {
-  logger.info(`Frontend connection established for session: ${sessionId}`);
-  ws.on("message", (data) => handleFrontendMessage(data, sessionId));
-  ws.on("close", () => {
-    logger.info(`Frontend WS connection closed for session: ${sessionId}`);
-    frontendConnections.delete(sessionId);
-  });
-}
-
-async function handleTwilioMessage(data: RawData, sessionId: string) {
-  let msg;
-  try {
-    msg = JSON.parse(data.toString());
-  } catch { return; }
-
-  if (msg.event !== "media") {
-    logger.info(`Twilio message for session ${sessionId}:`, msg.event);
-  }
-
-  const session = await getSession(sessionId);
-  const modelConn = modelConnections.get(sessionId);
-
-  switch (msg.event) {
-    case "start":
-      session.streamSid = msg.start.streamSid;
-      await saveSession(sessionId, session);
-      await tryConnectModel(sessionId);
-      break;
-    case "media":
-      session.latestMediaTimestamp = msg.media.timestamp;
-      // 세션 저장 부하를 줄이기 위해 timestamp는 매번 저장하지 않을 수 있음 (선택사항)
-      if (isOpen(modelConn)) {
-        jsonSend(modelConn, {
-          type: "input_audio_buffer.append",
-          audio: msg.media.payload, //Twilio에서 받은 음성을 OpenAI로 전송
-        });
-      }
-      break;
-    case "stop":
-    case "close":
-      await closeAllConnections(sessionId);
-      break;
-  }
-}
-
-async function handleFrontendMessage(data: RawData, sessionId: string) {
-  let msg;
-  try {
-    msg = parseMessage(data);
-  } catch (err) {
-    logger.error(`[handleFrontendMessage] parseMessage 에러 (Session: ${sessionId}):`, err);
-    return;
-  }
-  if (!msg) return;
-
-  // 웹훅 테스트 요청 처리
-  if (msg.type === "webhook.test") {
-    logger.info(`Webhook test 요청 (Session: ${sessionId})`);
-    sendTestWebhook(sessionId, msg.webhookUrl, msg.testData)
-        .then(result => {
-          const frontendConn = frontendConnections.get(sessionId);
-          if (frontendConn) {
-            jsonSend(frontendConn, { type: "webhook.test.result", ...result });
-          }
-        })
-        .catch(error => {
-          logger.error("[handleFrontendMessage] webhook test 에러:", error);
-        });
-    return;
-  }
-
-  try {
-    const modelConn = modelConnections.get(sessionId);
-    if (isOpen(modelConn)) {
-      jsonSend(modelConn, msg);
-    }
-    // 세션 설정을 업데이트하는 경우
-    if (msg.type === "session.update") {
-      const session = await getSession(sessionId);
-      session.saved_config = msg.session;
-      await saveSession(sessionId, session);
-    }
-  } catch (err) {
-    logger.error(`[handleFrontendMessage] modelConn 전송/세션 저장 에러 (Session: ${sessionId}):`, err);
-  }
-}
-
-async function tryConnectModel(sessionId: string) {
-  const session = await getSession(sessionId);
-  if (!callConnections.has(sessionId) || !session.streamSid || !session.openAIApiKey) return;
-
-  const modelConn = new WebSocket(
-      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17",
-      {
+    session.modelConn = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03', {
         headers: {
-          Authorization: `Bearer ${session.openAIApiKey}`,
-          "OpenAI-Beta": "realtime=v1",
+            Authorization: `Bearer ${session.openAIApiKey}`,
+            'OpenAI-Beta': 'realtime=v1',
         },
-      }
-  );
-  modelConnections.set(sessionId, modelConn);
-  // 이 부분은 논의가 필요: modelConn을 어떻게 관리할 것인가?
-  // 여기서는 간단히 session 객체에 저장하지 않고, Redis 상태와 메모리 연결을 조합해서 사용
-
-  modelConn.on("open", async () => {
-    logger.info("✅ OpenAI WebSocket connected");
-    const config = session.saved_config || {};
-    const sessionConfig = {
-      type: "session.update",
-      session: {
-        modalities: ["text", "audio"],
-        turn_detection: {
-          type: "server_vad",
-          threshold: 0.5,           // 음성 감지 임계값
-          prefix_padding_ms: 300,   // 음성 시작 전 패딩
-          silence_duration_ms: 200  // 침묵 지속 시간
-        },
-        voice: "ash",
-        input_audio_transcription: { model: "whisper-1" }, //stt
-        input_audio_format: "g711_ulaw",
-        output_audio_format: "g711_ulaw",
-
-        // 소음 제거 및 오디오 처리 옵션
-        input_audio_preprocessing: {
-          noise_suppression: true,    // 소음 제거 활성화
-          echo_cancellation: true,    // 에코 제거
-          auto_gain_control: true     // 자동 음량 조절
-        },
-
-        ...config,
-      },
-    };
-    logger.info("📝 Sending session config:", JSON.stringify(sessionConfig, null, 2));
-    jsonSend(session.modelConn, sessionConfig);
-    logger.info("📝 Sending initial prompt...");
-    sendUserMessage(modelConn, INITIAL_PROMPT);
-  });
-
-  modelConn.on("message", (data) =>{
-    try {
-      const dataStr = data.toString();
-      const messageType = JSON.parse(dataStr).type;
-      // 로그에서 제외할 메시지 타입들
-      const excludedTypes = [
-        "response.audio.delta",
-        "input_audio_buffer",
-        "conversation.item.created",
-        "response.created",
-        "response.done",
-        "rate_limits.updated",
-        "response.output_item.added",
-        "response.output_item.done",
-        "response.content_part.added",
-        "response.audio_transcript.delta",
-        "conversation.item.input_audio_transcription.delta"
-      ];
-      const shouldLog = !excludedTypes.some(type => messageType.includes(type));
-      if (shouldLog) {
-        logger.info("📨 OpenAI message received:", messageType, dataStr.substring(0, 200) + "...");
-      }
-      handleModelMessage(data, sessionId);
-    } catch (err) {
-      logger.error("[tryConnectModel] on message 핸들러 에러:", err);
-    }
-  })
-
-  modelConn.on("close", () => {
-    logger.info(`OpenAI WS closed for session: ${sessionId}`);
-  });
-  modelConn.on("error", (error) => {
-    logger.error("[tryConnectModel] OpenAI WebSocket 에러:", error);
-    closeModel(sessionId);
-  });
-}
-
-function sendUserMessage(modelConn: WebSocket, text: string) {
-  try {
-    logger.info("📤 Sending user message:", text.substring(0, 100) + "...");
-    if (!isOpen(modelConn)) {
-      logger.error("[sendUserMessage] modelConn 미연결, 메시지 전송 불가");
-      return;
-    }
-    /* ① user 메시지 생성 */
-    const userMessage = {
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [
-          {
-            type: "input_text",  // ← 'text'가 아니라 반드시 'input_text'
-            text,
-          },
-        ],
-      },
-    };
-    jsonSend(modelConn, userMessage);
-
-    /* ② assistant 응답 트리거 */
-    const responseCreate = { type: "response.create" };
-    jsonSend(modelConn, responseCreate);
-  } catch (err) {
-    logger.error("[sendUserMessage] 전체 예외:", err);
-  }
-}
-
-async function handleModelMessage(data: RawData, sessionId: string) {
-  let event;
-  try {
-    event = parseMessage(data);
-  } catch (err) {
-    logger.error("[handleModelMessage] parseMessage 에러:", err);
-    return; }
-  if (!event) return;
-
-  // 프론트엔드 연결이 있다면, 모든 모델 이벤트를 그대로 전달
-  const frontendConn = frontendConnections.get(sessionId);
-  if (isOpen(frontendConn)) {
-    jsonSend(frontendConn, event);
-  }
-
-  const session = await getSession(sessionId);
-  if (!session) return; // 세션이 없으면 중단
-
-  try {
-    switch (event.type) {
-      case "input_audio_buffer.speech_started":
-        await handleTruncation(sessionId);
-        break;
-
-      case "response.audio.delta":
-        const twilioConn = callConnections.get(sessionId);
-        if (isOpen(twilioConn) && session.streamSid) {
-          if (session.responseStartTimestamp === undefined) {
-            session.responseStartTimestamp = session.latestMediaTimestamp || 0;
-          }
-          if (event.item_id) session.lastAssistantItem = event.item_id;
-
-          // AI 음성 데이터를 Twilio로 전송
-          jsonSend(twilioConn, {
-            event: "media",
-            streamSid: session.streamSid,
-            media: {payload: event.delta},
-          });
-          jsonSend(twilioConn, {event: "mark", streamSid: session.streamSid});
-
-          // 변경된 세션 상태 저장
-          await saveSession(sessionId, session);
-        }
-        break;
-
-      case "response.output_item.done":
-      case "conversation.item.input_audio_transcription.completed":
-
-        if (event.type === "response.output_item.done" && event.item?.role === 'assistant') {
-          const contentItem = event.item.content?.[0];
-          const conversationText = contentItem?.text || contentItem?.transcript;
-
-          if (conversationText) {
-            if (!session.conversationHistory) session.conversationHistory = [];
-            session.conversationHistory.push({
-              is_elderly: false, // AI이므로 false
-              conversation: conversationText,
-            });
-            await saveSession(sessionId, session);
-            logger.info(`AI 응답 기록 업데이트 (Session: ${sessionId})`);
-          }
-
-        } else if (event.type === "conversation.item.input_audio_transcription.completed") {
-          const conversationText = event.transcript;
-
-          if (conversationText) {
-            if (!session.conversationHistory) session.conversationHistory = [];
-            session.conversationHistory.push({
-              is_elderly: true, // 사용자이므로 true
-              conversation: conversationText,
-            });
-            await saveSession(sessionId, session);
-            logger.info(`사용자 발화 기록 업데이트 (Session: ${sessionId})`);
-          }
-        }
-    }
-  } catch (err) {
-    logger.error(`[handleModelMessage] switch-case 처리 중 에러 (Session: ${sessionId}):`, err);
-  }
-}
-
-
-async function handleTruncation(sessionId: string) {
-  const session = await getSession(sessionId);
-  if (!session.lastAssistantItem || session.responseStartTimestamp === undefined) {
-    return;
-  }
-
-  const elapsedMs = (session.latestMediaTimestamp || 0) - (session.responseStartTimestamp || 0);
-  const audio_end_ms = elapsedMs > 0 ? elapsedMs : 0;
-
-  // AI에게 응답 잘라내기(truncate) 명령 전송
-  const modelConn = modelConnections.get(sessionId);
-  if (isOpen(modelConn)) {
-    jsonSend(modelConn, {
-      type: "conversation.item.truncate",
-      item_id: session.lastAssistantItem,
-      content_index: 0,
-      audio_end_ms,
     });
-  }
 
-  // Twilio의 오디오 출력 버퍼 비우기
-  const twilioConn = callConnections.get(sessionId);
-  if (isOpen(twilioConn) && session.streamSid) {
-    jsonSend(twilioConn, { event: "clear", streamSid: session.streamSid });
-  }
+    // OpenAI 연결 성공
+    session.modelConn.on('open', () => {
+        console.log(`✅ OpenAI 연결 완료 (CallSid: ${session.callSid})`);
 
-  // 사용한 세션 변수 초기화 후 Redis에 저장
-  session.lastAssistantItem = undefined;
-  session.responseStartTimestamp = undefined;
-  await saveSession(sessionId, session);
+        // 세션 설정
+        const sessionConfig = {
+            type: 'session.update',
+            session: {
+                modalities: ['text', 'audio'],
+                turn_detection: {
+                    type: 'server_vad',
+                    threshold: 0.6,
+                    prefix_padding_ms: 660,
+                    silence_duration_ms: 850,
+                },
+                voice: 'ash',
+                input_audio_transcription: { model: 'whisper-1' },
+                input_audio_format: 'g711_ulaw',
+                output_audio_format: 'g711_ulaw',
+                input_audio_noise_reduction: { type: 'near_field' },
+            },
+        };
+
+        jsonSend(session.modelConn, sessionConfig);
+
+        // 초기 프롬프트 전송
+        if (session.prompt) {
+            sendUserMessage(sessionId, session.prompt);
+        }
+    });
+
+    // OpenAI 메시지 처리
+    session.modelConn.on('message', (data) => handleOpenAIMessage(sessionId, data));
+
+    // 연결 오류 처리
+    session.modelConn.on('error', (error) => {
+        console.error(`❌ OpenAI 연결 오류 (CallSid: ${session.callSid}):`, error);
+    });
+
+    session.modelConn.on('close', () => {
+        console.log(`🔌 OpenAI 연결 종료 (CallSid: ${session.callSid})`);
+    });
 }
 
+// === 사용자 메시지 전송 ===
+function sendUserMessage(sessionId: string, text: string): void {
+    const session = getSession(sessionId);
+    if (!session || !isOpen(session.modelConn)) return;
 
-function closeModel(sessionId: string) {
+    const userMessage = {
+        type: 'conversation.item.create',
+        item: {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text }],
+        },
+    };
 
-  const modelConn = modelConnections.get(sessionId);
-  if (isOpen(modelConn)) {
-    modelConn.close();
-  }
-  modelConnections.delete(sessionId);
-
-  logger.info(`OpenAI 모델 연결 정리 완료 (Session: ${sessionId})`);
+    jsonSend(session.modelConn, userMessage);
+    jsonSend(session.modelConn, { type: 'response.create' });
 }
 
+// === OpenAI 메시지 처리 ===
+function handleOpenAIMessage(sessionId: string, data: RawData): void {
+    const session = getSession(sessionId);
+    if (!session) return;
 
-async function closeAllConnections(sessionId: string) {
-  logger.info(`모든 연결 정리 시작 (Session: ${sessionId})...`);
+    const event = parseMessage(data);
+    if (!event) return;
 
-  const session = await getSession(sessionId);
+    switch (event.type) {
+        case 'input_audio_buffer.speech_started':
+            // 사용자 말하기 시작 - AI 응답 중단
+            handleTruncation(sessionId);
+            break;
 
-  try {
-    if (session?.conversationHistory && session.conversationHistory.length > 0 && session.webhookUrl) {
-      logger.info(`📤 대화 기록 웹훅 전송 (Session: ${sessionId})`);
-      await sendToWebhook(session.conversationHistory, session.webhookUrl, sessionId); // webhookUrl 전달
+        case 'response.audio.delta':
+            // AI 음성 응답을 Twilio로 전달
+            if (session.twilioConn && session.streamSid) {
+                if (session.responseStartTimestamp === undefined) {
+                    session.responseStartTimestamp = session.latestMediaTimestamp || 0;
+                }
+                if (event.item_id) session.lastAssistantItem = event.item_id;
+
+                jsonSend(session.twilioConn, {
+                    event: 'media',
+                    streamSid: session.streamSid,
+                    media: { payload: event.delta },
+                });
+
+                jsonSend(session.twilioConn, {
+                    event: 'mark',
+                    streamSid: session.streamSid,
+                });
+            }
+            break;
+
+        case 'response.output_item.done':
+            // AI 응답 완료 - 텍스트 저장
+            const { item } = event;
+
+            if (item.type === 'message' && item.role === 'assistant') {
+                const content = item.content;
+
+                if (content && Array.isArray(content)) {
+                    for (const contentItem of content) {
+                        let aiResponse = null;
+                        if (contentItem.type === 'text' && contentItem.text) {
+                            aiResponse = contentItem.text;
+                        } else if (contentItem.type === 'audio' && contentItem.transcript) {
+                            aiResponse = contentItem.transcript;
+                        }
+
+                        if (aiResponse) {
+                            console.log(`🤖 AI (CallSid: ${session.callSid}):`, aiResponse);
+                            session.conversationHistory.push({
+                                is_elderly: false,
+                                conversation: aiResponse,
+                            });
+                            console.log(
+                                `📊 대화 기록 (CallSid: ${session.callSid}): ${session.conversationHistory.length}개`
+                            );
+                        }
+                    }
+                }
+            }
+            break;
+
+        case 'conversation.item.input_audio_transcription.completed':
+            // 사용자 음성 인식 완료 - 텍스트 저장
+            if (event.transcript) {
+                console.log(`👤 사용자 (CallSid: ${session.callSid}):`, event.transcript);
+                session.conversationHistory.push({
+                    is_elderly: true,
+                    conversation: event.transcript,
+                });
+                console.log(
+                    `💾 사용자 응답 저장 (CallSid: ${session.callSid}) - 총 ${session.conversationHistory.length}개`
+                );
+            }
+            break;
     }
-  } catch (error) {
-    logger.error(`❌ 웹훅 전송 실패 (Session: ${sessionId}):`, error);
-  }
-
-  const twilioConn = callConnections.get(sessionId);
-  if (isOpen(twilioConn)) twilioConn.close();
-
-  const modelConn = modelConnections.get(sessionId);
-  if (isOpen(modelConn)) modelConn.close();
-
-  const frontendConn = frontendConnections.get(sessionId);
-  if (isOpen(frontendConn)) frontendConn.close();
-
-  callConnections.delete(sessionId);
-  modelConnections.delete(sessionId);
-  frontendConnections.delete(sessionId);
-
-  await deleteSession(sessionId);
-
-  logger.info(`✅ 세션 정리 완료 (Session: ${sessionId})`);
 }
 
+// === 응답 중단 처리 ===
+function handleTruncation(sessionId: string): void {
+    const session = getSession(sessionId);
+    if (!session || !session.lastAssistantItem || session.responseStartTimestamp === undefined) {
+        return;
+    }
 
-function cleanupConnection(ws?: WebSocket) {
-  if (isOpen(ws)) ws.close();
+    const elapsedMs = (session.latestMediaTimestamp || 0) - (session.responseStartTimestamp || 0);
+    const audio_end_ms = elapsedMs > 0 ? elapsedMs : 0;
+
+    // OpenAI에 중단 명령
+    if (isOpen(session.modelConn)) {
+        jsonSend(session.modelConn, {
+            type: 'conversation.item.truncate',
+            item_id: session.lastAssistantItem,
+            content_index: 0,
+            audio_end_ms,
+        });
+    }
+
+    // Twilio 스트림 클리어
+    if (session.twilioConn && session.streamSid) {
+        jsonSend(session.twilioConn, {
+            event: 'clear',
+            streamSid: session.streamSid,
+        });
+    }
+
+    session.lastAssistantItem = undefined;
+    session.responseStartTimestamp = undefined;
 }
 
+// === 웹훅 전송 함수 ===
+export async function sendToWebhook(sessionId: string, conversationHistory: any[]): Promise<void> {
+    const session = getSession(sessionId);
+    const webhookUrl = session?.webhookUrl || process.env.WEBHOOK_URL;
+
+    if (!webhookUrl) {
+        console.log('웹훅 URL이 설정되지 않음');
+        return;
+    }
+
+    const formattedData = {
+        sessionId,
+        callSid: session?.callSid, // CallSid 추가
+        elderId: session?.elderId,
+        content: conversationHistory,
+    };
+
+    console.log(`🌐 웹훅 전송 (CallSid: ${session?.callSid}):`, webhookUrl);
+    console.log(`📦 웹훅 전송 데이터:`, JSON.stringify(formattedData, null, 2));
+
+    try {
+        const response = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(formattedData),
+        });
+
+        if (response.ok) {
+            console.log(`✅ 웹훅 전송 성공 (CallSid: ${session?.callSid})`);
+        } else {
+            console.error(`❌ 웹훅 전송 실패 (CallSid: ${session?.callSid}):`, response.status);
+        }
+    } catch (error) {
+        console.error(`❌ 웹훅 오류 (CallSid: ${session?.callSid}):`, error);
+    }
+}
+
+// === 🏁 통화 종료 처리 (필수) ===
+function closeAllConnections(sessionId: string): void {
+    const session = getSession(sessionId);
+    if (!session) return;
+
+    console.log(`🔌 세션 종료 처리 (CallSid: ${session.callSid})...`);
+    console.log(`📊 대화 기록: ${session.conversationHistory?.length || 0}개`);
+
+    // 웹훅 전송 (비동기)
+    const sendWebhookPromise = async () => {
+        if (session.conversationHistory && session.conversationHistory.length > 0) {
+            console.log(`📤 대화 기록 웹훅 전송 중 (CallSid: ${session.callSid})...`);
+            try {
+                await sendToWebhook(sessionId, session.conversationHistory);
+                console.log(`✅ 웹훅 전송 완료 (CallSid: ${session.callSid})`);
+            } catch (error) {
+                console.error(`❌ 웹훅 전송 실패 (CallSid: ${session.callSid}):`, error);
+            }
+        } else {
+            console.log(`❌ 전송할 대화 기록 없음 (CallSid: ${session.callSid})`);
+        }
+    };
+
+    // 정리 작업
+    Promise.resolve(sendWebhookPromise()).finally(() => {
+        // WebSocket 연결 종료
+        if (session.twilioConn) {
+            session.twilioConn.close();
+            session.twilioConn = undefined;
+        }
+        if (session.modelConn) {
+            session.modelConn.close();
+            session.modelConn = undefined;
+        }
+
+        // 세션 삭제
+        sessions.delete(sessionId);
+        console.log(`🧹 세션 정리 완료 (CallSid: ${session.callSid})`);
+    });
+}
+
+// === 🛠️ 유틸리티 함수들 ===
 function parseMessage(data: RawData): any {
-  try {
-    return JSON.parse(data.toString());
-  } catch {
-    return null;
-  }
+    try {
+        return JSON.parse(data.toString());
+    } catch {
+        return null;
+    }
 }
 
-function jsonSend(ws: WebSocket | undefined, obj: unknown) {
-  if (!isOpen(ws)) {
-    return;
-  }
-  
-  const message = JSON.stringify(obj);
-  ws.send(message);
+function jsonSend(ws: WebSocket | undefined, obj: unknown): void {
+    if (!isOpen(ws)) return;
+    ws.send(JSON.stringify(obj));
 }
 
 function isOpen(ws?: WebSocket): ws is WebSocket {
-  return !!ws && ws.readyState === WebSocket.OPEN;
+    return !!ws && ws.readyState === WebSocket.OPEN;
 }
 
+// === 📊 상태 조회 함수들 ===
+export function getSessionStatus(sessionId: string) {
+    const session = getSession(sessionId);
+    if (!session) {
+        return { exists: false };
+    }
+
+    return {
+        exists: true,
+        sessionId: session.sessionId,
+        callSid: session.callSid, // CallSid 추가
+        elderId: session.elderId,
+        conversationCount: session.conversationHistory.length,
+        isActive: isOpen(session.twilioConn) && isOpen(session.modelConn),
+    };
+}
+
+export function getAllActiveSessions() {
+    return {
+        totalSessions: sessions.size,
+        activeSessions: Array.from(sessions.values()).map((session) => ({
+            sessionId: session.sessionId,
+            callSid: session.callSid, // CallSid 추가
+            elderId: session.elderId,
+            conversationCount: session.conversationHistory.length,
+            isActive: isOpen(session.twilioConn) && isOpen(session.modelConn),
+        })),
+    };
+}
