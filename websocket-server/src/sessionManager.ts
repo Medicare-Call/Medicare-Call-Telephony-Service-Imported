@@ -100,7 +100,7 @@ function handleTwilioMessage(sessionId: string, data: RawData): void {
 
     switch (msg.event) {
         case 'start':
-            console.log(`📞 통화 시작 (CallSid: ${session.callSid}), streamSid: ${msg.start.streamSid}`);
+            console.log(`통화 시작 (CallSid: ${session.callSid}), streamSid: ${msg.start.streamSid}`);
             session.streamSid = msg.start.streamSid;
             session.latestMediaTimestamp = 0;
             session.lastAssistantItem = undefined;
@@ -260,7 +260,7 @@ function handleOpenAIMessage(sessionId: string, data: RawData): void {
                         }
 
                         if (aiResponse) {
-                            console.log(`AI (CallSid: ${session.callSid}):`, aiResponse);
+                            console.log(`AI:`, aiResponse);
                             session.conversationHistory.push({
                                 is_elderly: false,
                                 conversation: aiResponse,
@@ -274,7 +274,7 @@ function handleOpenAIMessage(sessionId: string, data: RawData): void {
         case 'conversation.item.input_audio_transcription.completed':
             // 사용자 음성 인식 완료 - 텍스트 저장
             if (event.transcript) {
-                console.log(`사용자 (CallSid: ${session.callSid}):`, event.transcript);
+                console.log(`사용자:`, event.transcript);
                 session.conversationHistory.push({
                     is_elderly: true,
                     conversation: event.transcript,
@@ -327,8 +327,6 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
     }
 
     const formattedData = {
-        sessionId,
-        callSid: session?.callSid,
         elderId: session?.elderId,
         content: conversationHistory,
     };
@@ -364,10 +362,9 @@ function closeAllConnections(sessionId: string): void {
     // 웹훅 전송 (비동기)
     const sendWebhookPromise = async () => {
         if (session.conversationHistory && session.conversationHistory.length > 0) {
-            console.log(`대화 기록 웹훅 전송 중 (CallSid: ${session.callSid})...`);
+            console.log(`대화 기록 전송 중 (CallSid: ${session.callSid})...`);
             try {
                 await sendToWebhook(sessionId, session.conversationHistory);
-                console.log(`웹훅 전송 완료 (CallSid: ${session.callSid})`);
             } catch (error) {
                 console.error(`웹훅 전송 실패 (CallSid: ${session.callSid}):`, error);
             }
