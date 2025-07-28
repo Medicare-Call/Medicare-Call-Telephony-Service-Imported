@@ -25,7 +25,6 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID!;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN!;
-const TWILIO_RECIPIENT_NUMBER = process.env.TWILIO_RECIPIENT_NUMBER!;
 
 // 여러 개의 발신 번호 관리
 const TWILIO_CALLER_NUMBERS = process.env.TWILIO_CALLER_NUMBERS?.split(',').map((num) => num.trim()) || [];
@@ -92,15 +91,22 @@ const mainRouter = express.Router();
 
 mainRouter.post('/twiml', (req: Request, res: Response) => {
     const callSid = req.body.CallSid;
-    const elderId = req.query.elderId as string;
+    const elderIdParam = req.query.elderId as string;
     const prompt = req.query.prompt ? decodeURIComponent(req.query.prompt as string) : undefined;
 
     if (!callSid) {
         res.status(400).send('CallSid is required');
         return;
     }
-    if (!elderId) {
+    if (!elderIdParam) {
         res.status(400).send('elderId is required');
+        return;
+    }
+
+    // elderId를 number로 변환
+    const elderId = parseInt(elderIdParam, 10);
+    if (isNaN(elderId)) {
+        res.status(400).send('elderId must be a valid number');
         return;
     }
 
@@ -116,7 +122,7 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
 });
 
 interface CallRequest {
-    elderId: string;
+    elderId: number;
     phoneNumber?: string;
     prompt?: string;
 }
@@ -125,8 +131,8 @@ mainRouter.post('/call', async (req: Request, res: Response) => {
     try {
         const { elderId, phoneNumber, prompt } = req.body;
 
-        if (!elderId) {
-            res.status(400).json({ success: false, error: 'elderId는 필수입니다' });
+        if (!elderId || typeof elderId !== 'number') {
+            res.status(400).json({ success: false, error: 'elderId는 숫자여야 합니다' });
             return;
         }
 
@@ -144,20 +150,20 @@ mainRouter.post('/call', async (req: Request, res: Response) => {
         }
 
         const twimlUrl = new URL(`${PUBLIC_URL}/call/twiml`);
-        twimlUrl.searchParams.set('elderId', elderId);
+        twimlUrl.searchParams.set('elderId', elderId.toString());
         if (prompt) {
             twimlUrl.searchParams.set('prompt', encodeURIComponent(prompt));
         }
 
         logger.info(`전화 생성 파라미터:`, {
             url: twimlUrl.toString(),
-            to: phoneNumber || TWILIO_RECIPIENT_NUMBER,
+            to: phoneNumber,
             from: availableCallerNumber,
         });
 
         const call = await twilioClient.calls.create({
             url: twimlUrl.toString(),
-            to: phoneNumber || TWILIO_RECIPIENT_NUMBER,
+            to: phoneNumber,
             from: availableCallerNumber,
         });
 
@@ -215,11 +221,19 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         // parts[0] = 'call', parts[1] = callSid, parts[2] = elderId
         const type = parts[0];
         const sessionId = parts[1];
-        const elderId = parts[2];
+        const elderIdParam = parts[2];
         const prompt = url.searchParams.get('prompt') ? decodeURIComponent(url.searchParams.get('prompt')!) : undefined;
 
-        if (!elderId) {
+        if (!elderIdParam) {
             logger.error(`elderId가 없습니다. sessionId: ${sessionId}`);
+            ws.close();
+            return;
+        }
+
+        // elderId를 number로 변환
+        const elderId = parseInt(elderIdParam, 10);
+        if (isNaN(elderId)) {
+            logger.error(`elderId가 유효한 숫자가 아닙니다. sessionId: ${sessionId}, elderId: ${elderIdParam}`);
             ws.close();
             return;
         }

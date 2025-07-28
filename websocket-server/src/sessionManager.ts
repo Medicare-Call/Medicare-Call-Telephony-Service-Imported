@@ -3,7 +3,7 @@ import { RawData, WebSocket } from 'ws';
 interface Session {
     sessionId: string;
     callSid: string;
-    elderId?: string;
+    elderId?: number;
     prompt?: string;
     twilioConn?: WebSocket;
     modelConn?: WebSocket;
@@ -26,7 +26,7 @@ function createSession(
     callSid: string,
     config: {
         openAIApiKey: string;
-        elderId?: string;
+        elderId?: number;
         prompt?: string;
         webhookUrl?: string;
     }
@@ -51,7 +51,7 @@ export function handleCallConnection(
     ws: WebSocket,
     openAIApiKey: string,
     webhookUrl?: string,
-    elderId?: string,
+    elderId?: number,
     prompt?: string,
     callSid?: string
 ): string {
