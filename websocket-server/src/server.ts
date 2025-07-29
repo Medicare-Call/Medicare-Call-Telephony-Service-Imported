@@ -127,7 +127,7 @@ interface CallRequest {
     prompt?: string;
 }
 
-mainRouter.post('/call', async (req: Request, res: Response) => {
+mainRouter.post('/run', async (req: Request, res: Response) => {
     try {
         const { elderId, phoneNumber, prompt } = req.body;
 
