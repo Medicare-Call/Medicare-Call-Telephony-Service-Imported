@@ -56,17 +56,21 @@ jobs:
             echo "이미지명: ${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}"
 
             echo "Running new node container"
-            sudo docker run -d -p ${NODE_PORT}:8081 --name medicare-node \
-            -e OPENAI_API_KEY=${OPENAI_API_KEY} \
-            -e PUBLIC_URL=${PUBLIC_URL} \
-            -e WEBHOOK_URL=${WEBHOOK_URL} \
-            -e TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID} \
-            -e TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN} \
-            -e TWILIO_CALLER_NUMBER=${TWILIO_CALLER_NUMBER} \
-            -e TWILIO_RECIPIENT_NUMBER=${TWILIO_RECIPIENT_NUMBER} \
-            -e REDIS_HOST=${REDIS_HOST} \
-            -e REDIS_PORT=${REDIS_PORT} \
-            ${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}
+            sudo docker run -d -p "${NODE_PORT}:8081" --name medicare-node \
+            -e OPENAI_API_KEY="${OPENAI_API_KEY}" \
+            -e PUBLIC_URL="${PUBLIC_URL}" \
+            -e WEBHOOK_URL="${WEBHOOK_URL}" \
+            -e TWILIO_ACCOUNT_SID="${TWILIO_ACCOUNT_SID}" \
+            -e TWILIO_AUTH_TOKEN="${TWILIO_AUTH_TOKEN}" \
+            -e TWILIO_CALLER_NUMBER="${TWILIO_CALLER_NUMBER}" \
+            -e TWILIO_RECIPIENT_NUMBER="${TWILIO_RECIPIENT_NUMBER}" \
+            -e REDIS_HOST="${REDIS_HOST}" \
+            -e REDIS_PORT="${REDIS_PORT}" \
+            "${DOCKER_USERNAME}/${DOCKER_IMAGE_NODE}"
+
+            # 컨테이너 실행 확인
+            echo "컨테이너 실행 상태 확인:"
+            sudo docker ps -a | grep medicare-node
 
             echo "Cleaning up old images"
             sudo docker image prune -f
