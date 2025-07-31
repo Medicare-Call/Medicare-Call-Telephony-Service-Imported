@@ -35,7 +35,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_CALLER_NUMBER = process.env.TWILIO_CALLER_NUMBER;
+const TWILIO_CALLER_NUMBERS = process.env.TWILIO_CALLER_NUMBERS;
 const TWILIO_RECIPIENT_NUMBER = process.env.TWILIO_RECIPIENT_NUMBER;
 const twilioClient = (0, twilio_1.default)(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 if (!OPENAI_API_KEY) {
@@ -86,7 +86,7 @@ mainRouter.post("/call", (req, res) => __awaiter(void 0, void 0, void 0, functio
         const call = yield twilioClient.calls.create({
             url: twimlUrl.toString(),
             to: phoneNumber || TWILIO_RECIPIENT_NUMBER,
-            from: TWILIO_CALLER_NUMBER,
+            from: TWILIO_CALLER_NUMBERS,
         });
         logger.info(`전화 연결 시작 - CallSid: ${call.sid}, elderId: ${elderId}`);
         res.json({ success: true, sid: call.sid, elderId, prompt: prompt || null });
