@@ -184,25 +184,6 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
     }
 });
 
-// 발신 번호 상태 조회 엔드포인트
-mainRouter.get('/caller-numbers/status', (req: Request, res: Response) => {
-    const status = {
-        totalNumbers: TWILIO_CALLER_NUMBERS.length,
-        activeNumbers: activeCallerNumbers.size,
-        availableNumbers: TWILIO_CALLER_NUMBERS.length - activeCallerNumbers.size,
-        callerNumbers: TWILIO_CALLER_NUMBERS.map((number) => ({
-            number,
-            isActive: activeCallerNumbers.has(number),
-        })),
-        activeCalls: Array.from(callToCallerNumber.entries()).map(([callSid, number]) => ({
-            callSid,
-            callerNumber: number,
-        })),
-    };
-
-    res.json(status);
-});
-
 app.use('/call', mainRouter);
 
 wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
