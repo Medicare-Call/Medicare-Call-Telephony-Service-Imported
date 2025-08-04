@@ -160,7 +160,7 @@ function connectToOpenAI(sessionId: string): void {
                     type: 'server_vad',
                     threshold: 0.6,
                     prefix_padding_ms: 660,
-                    silence_duration_ms: 850,
+                    silence_duration_ms: 300,
                 },
                 voice: 'ash',
                 input_audio_transcription: { model: 'whisper-1' },
@@ -178,13 +178,14 @@ function connectToOpenAI(sessionId: string): void {
         }
     });
 
-    // OpenAI 메시지 처리
-    session.modelConn.on('message', (data) => handleOpenAIMessage(sessionId, data));
-
+    session.modelConn.on('message', (data) => {
+        const ts = Date.now();
+        console.log(`[OpenAI 응답 수신] ${ts}`);
+        handleOpenAIMessage(sessionId, data);
+    });
     session.modelConn.on('error', (error) => {
         console.error(`OpenAI 연결 오류 (CallSid: ${session.callSid}):`, error);
     });
-
     session.modelConn.on('close', () => {
         console.log(`OpenAI 연결 종료 (CallSid: ${session.callSid})`);
     });
@@ -223,6 +224,8 @@ function handleOpenAIMessage(sessionId: string, data: RawData): void {
             break;
 
         case 'response.audio.delta':
+            const t = Date.now();
+            console.log(`[AI 응답 전달 시작] ${t}`);
             // AI 음성 응답을 Twilio로 전달
             if (session.twilioConn && session.streamSid) {
                 if (session.responseStartTimestamp === undefined) {
@@ -272,6 +275,8 @@ function handleOpenAIMessage(sessionId: string, data: RawData): void {
             break;
 
         case 'conversation.item.input_audio_transcription.completed':
+            const ts = Date.now();
+            console.log(`[[STT] 인식 완료] ${ts}:`);
             // 사용자 음성 인식 완료 - 텍스트 저장
             if (event.transcript) {
                 console.log(`사용자:`, event.transcript);
