@@ -91,7 +91,7 @@ const mainRouter = express.Router();
 
 mainRouter.post('/twiml', (req: Request, res: Response) => {
     const callSid = req.body.CallSid;
-    const elderIdParam = req.body.elderId || req.query.elderId; // 혹시 쿼리에도 있을 수 있어서 둘 다 체크
+    const elderIdParam = req.body.elderId || req.query.elderId;
     const prompt = req.body.prompt;  // POST body에서 읽기
 
     if (!callSid) {
@@ -114,7 +114,7 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
     const wsUrl = new URL(PUBLIC_URL);
     wsUrl.protocol = 'wss:';
     wsUrl.pathname = `/call/${callSid}/${elderId}`;
-    if (prompt) wsUrl.searchParams.set('prompt', prompt);  // 여기는 query가 아닌 URL param 으로 남겨도 무방
+    if (prompt) wsUrl.searchParams.set('prompt', prompt);
 
     const twimlContent = twimlTemplate.replace('{{WS_URL}}', wsUrl.toString().replace(/&/g, '&amp;'));
     res.set('Content-Type', 'text/xml; charset=utf-8').send(twimlContent);
