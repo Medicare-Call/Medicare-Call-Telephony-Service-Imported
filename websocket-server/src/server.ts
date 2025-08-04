@@ -91,8 +91,8 @@ const mainRouter = express.Router();
 
 mainRouter.post('/twiml', (req: Request, res: Response) => {
     const callSid = req.body.CallSid;
-    const elderIdParam = req.query.elderId as string;
-    const prompt = req.query.prompt ? decodeURIComponent(req.query.prompt as string) : undefined;
+    const elderIdParam = req.body.elderId || req.query.elderId; // 혹시 쿼리에도 있을 수 있어서 둘 다 체크
+    const prompt = req.body.prompt;  // POST body에서 읽기
 
     if (!callSid) {
         res.status(400).send('CallSid is required');
@@ -103,7 +103,6 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
         return;
     }
 
-    // elderId를 number로 변환
     const elderId = parseInt(elderIdParam, 10);
     if (isNaN(elderId)) {
         res.status(400).send('elderId must be a valid number');
@@ -115,11 +114,12 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
     const wsUrl = new URL(PUBLIC_URL);
     wsUrl.protocol = 'wss:';
     wsUrl.pathname = `/call/${callSid}/${elderId}`;
-    if (prompt) wsUrl.searchParams.set('prompt', prompt);
+    if (prompt) wsUrl.searchParams.set('prompt', prompt);  // 여기는 query가 아닌 URL param 으로 남겨도 무방
 
     const twimlContent = twimlTemplate.replace('{{WS_URL}}', wsUrl.toString().replace(/&/g, '&amp;'));
     res.set('Content-Type', 'text/xml; charset=utf-8').send(twimlContent);
 });
+
 
 interface CallRequest {
     elderId: number;
@@ -151,9 +151,6 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
 
         const twimlUrl = new URL(`${PUBLIC_URL}/call/twiml`);
         twimlUrl.searchParams.set('elderId', elderId.toString());
-        if (prompt) {
-            twimlUrl.searchParams.set('prompt', encodeURIComponent(prompt));
-        }
 
         logger.info(`전화 생성 파라미터:`, {
             url: twimlUrl.toString(),
@@ -163,6 +160,7 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
 
         const call = await twilioClient.calls.create({
             url: twimlUrl.toString(),
+            method: 'POST',
             to: phoneNumber,
             from: availableCallerNumber,
         });
