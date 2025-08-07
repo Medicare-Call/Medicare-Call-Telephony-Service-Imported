@@ -339,6 +339,7 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
     }
 
     const formattedData = {
+        callSid: session?.callSid,
         elderId: session?.elderId,
         content: conversationHistory,
     };
