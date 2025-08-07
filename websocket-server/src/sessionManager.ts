@@ -167,20 +167,27 @@ function connectToOpenAI(sessionId: string): void {
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
                 input_audio_noise_reduction: { type: 'near_field' },
+                instructions: session.prompt,
             },
         };
 
         jsonSend(session.modelConn, sessionConfig);
 
         // 프롬프트 전송
-        if (session.prompt) {
-            sendUserMessage(sessionId, session.prompt);
-        }
+        // if (session.prompt) {
+        //     sendUserMessage(sessionId, session.prompt);
+        // }
     });
 
     session.modelConn.on('message', (data) => {
-        const ts = Date.now();
-        console.log(`[OpenAI 응답 수신] ${ts}`);
+        const event = parseMessage(data);
+        // 반드시 string 체크
+        if (event?.type === 'session.updated') {
+            // session.update 완료됨
+            if (session.prompt) {
+                sendUserMessage(sessionId, session.prompt);
+            }
+        }
         handleOpenAIMessage(sessionId, data);
     });
     session.modelConn.on('error', (error) => {
@@ -200,7 +207,7 @@ function sendUserMessage(sessionId: string, text: string): void {
         type: 'conversation.item.create',
         item: {
             type: 'message',
-            role: 'user',
+            role: 'system',
             content: [{ type: 'input_text', text }],
         },
     };

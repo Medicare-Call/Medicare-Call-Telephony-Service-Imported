@@ -91,8 +91,23 @@ const mainRouter = express.Router();
 
 mainRouter.post('/twiml', (req: Request, res: Response) => {
     const callSid = req.body.CallSid;
-    const elderIdParam = req.body.elderId || req.query.elderId;
-    const prompt = req.body.prompt;  // POST body에서 읽기
+    const elderIdParam = req.query.elderId || req.body.elderId;
+    const sessionId = req.query.sessionId || req.body.sessionId;
+
+    // 세션 ID를 통해 프롬프트 가져오기
+    let prompt = req.query.prompt || req.body.prompt;
+
+    logger.info(`TwiML 요청 디버그 - sessionId: ${sessionId}, prompt: ${prompt ? '있음' : '없음'}`);
+
+    if (sessionId && !prompt) {
+        prompt = (global as any).promptSessions?.get(sessionId);
+        logger.info(`세션에서 프롬프트 가져오기 - sessionId: ${sessionId}, found: ${prompt ? '있음' : '없음'}`);
+        if (prompt) {
+            // 사용 후 세션에서 제거
+            (global as any).promptSessions.delete(sessionId);
+            logger.info(`세션에서 프롬프트 제거 완료`);
+        }
+    }
 
     if (!callSid) {
         res.status(400).send('CallSid is required');
@@ -114,12 +129,20 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
     const wsUrl = new URL(PUBLIC_URL);
     wsUrl.protocol = 'wss:';
     wsUrl.pathname = `/call/${callSid}/${elderId}`;
-    if (prompt) wsUrl.searchParams.set('prompt', prompt);
 
-    const twimlContent = twimlTemplate.replace('{{WS_URL}}', wsUrl.toString().replace(/&/g, '&amp;'));
+    // 프롬프트가 있으면 CallSid를 키로 저장
+    if (prompt) {
+        (global as any).promptSessions = (global as any).promptSessions || new Map();
+        (global as any).promptSessions.set(callSid, prompt);
+        logger.info(`CallSid로 프롬프트 저장 - callSid: ${callSid}, prompt 길이: ${prompt.length}`);
+    }
+
+    const wsUrlString = wsUrl.toString().replace(/&/g, '&amp;');
+    logger.info(`생성된 WebSocket URL: ${wsUrlString}`);
+
+    const twimlContent = twimlTemplate.replace('{{WS_URL}}', wsUrlString);
     res.set('Content-Type', 'text/xml; charset=utf-8').send(twimlContent);
 });
-
 
 interface CallRequest {
     elderId: number;
@@ -130,6 +153,13 @@ interface CallRequest {
 mainRouter.post('/run', async (req: Request, res: Response) => {
     try {
         const { elderId, phoneNumber, prompt } = req.body;
+
+        logger.info(
+            `/run 요청 받음 - elderId: ${elderId}, phoneNumber: ${phoneNumber}, prompt: ${prompt ? '있음' : '없음'}`
+        );
+        if (prompt) {
+            logger.info(`프롬프트 내용: ${prompt.substring(0, 100)}${prompt.length > 100 ? '...' : ''}`);
+        }
 
         if (!elderId || typeof elderId !== 'number') {
             res.status(400).json({ success: false, error: 'elderId는 숫자여야 합니다' });
@@ -149,8 +179,20 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
             return;
         }
 
+        // 프롬프트가 길 경우를 대비해 세션에 저장
+        const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        if (prompt) {
+            // 프롬프트를 임시 세션에 저장 (실제로는 Redis나 DB 사용 권장)
+            (global as any).promptSessions = (global as any).promptSessions || new Map();
+            (global as any).promptSessions.set(sessionId, prompt);
+            logger.info(`프롬프트 세션 저장 - sessionId: ${sessionId}, prompt 길이: ${prompt.length}`);
+        }
+
         const twimlUrl = new URL(`${PUBLIC_URL}/call/twiml`);
         twimlUrl.searchParams.set('elderId', elderId.toString());
+        if (prompt) {
+            twimlUrl.searchParams.set('sessionId', sessionId);
+        }
 
         logger.info(`전화 생성 파라미터:`, {
             url: twimlUrl.toString(),
@@ -201,7 +243,19 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         const type = parts[0];
         const sessionId = parts[1];
         const elderIdParam = parts[2];
-        const prompt = url.searchParams.get('prompt') ? decodeURIComponent(url.searchParams.get('prompt')!) : undefined;
+
+        // CallSid를 통해 프롬프트 가져오기
+        let prompt = undefined;
+        if (sessionId) {
+            prompt = (global as any).promptSessions?.get(sessionId);
+            if (prompt) {
+                // 사용 후 세션에서 제거
+                (global as any).promptSessions.delete(sessionId);
+                logger.info(`CallSid로 프롬프트 가져옴 - callSid: ${sessionId}, prompt 길이: ${prompt.length}`);
+            } else {
+                logger.info(`CallSid로 프롬프트를 찾을 수 없음 - callSid: ${sessionId}`);
+            }
+        }
 
         if (!elderIdParam) {
             logger.error(`elderId가 없습니다. sessionId: ${sessionId}`);
