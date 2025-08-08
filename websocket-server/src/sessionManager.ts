@@ -4,6 +4,7 @@ interface Session {
     sessionId: string;
     callSid: string;
     elderId?: number;
+    settingId?: number; // settingId 추가
     prompt?: string;
     twilioConn?: WebSocket;
     modelConn?: WebSocket;
@@ -14,11 +15,15 @@ interface Session {
     openAIApiKey: string;
     webhookUrl?: string;
     conversationHistory: { is_elderly: boolean; conversation: string }[];
+    startTime?: Date; // 통화 시작 시간 추가
+    callStatus?: string; // 통화 상태 추가
+    responded?: number; // 응답 여부 추가 (0: 응답하지 않음, 1: 응답함)
+    endTime?: Date; // 통화 종료 시간 추가
 }
 
 let sessions: Map<string, Session> = new Map();
 
-function getSession(sessionId: string): Session | undefined {
+export function getSession(sessionId: string): Session | undefined {
     return sessions.get(sessionId);
 }
 
@@ -27,6 +32,7 @@ function createSession(
     config: {
         openAIApiKey: string;
         elderId?: number;
+        settingId?: number;
         prompt?: string;
         webhookUrl?: string;
     }
@@ -35,10 +41,12 @@ function createSession(
         sessionId: callSid, // sessionId = callSid
         callSid: callSid, // CallSid 명시적 저장
         elderId: config.elderId,
+        settingId: config.settingId,
         prompt: config.prompt,
         openAIApiKey: config.openAIApiKey,
         webhookUrl: config.webhookUrl,
         conversationHistory: [],
+        startTime: new Date(), // 통화 시작 시간 기록
     };
 
     sessions.set(callSid, session);
@@ -52,6 +60,7 @@ export function handleCallConnection(
     openAIApiKey: string,
     webhookUrl?: string,
     elderId?: number,
+    settingId?: number,
     prompt?: string,
     callSid?: string
 ): string {
@@ -67,10 +76,11 @@ export function handleCallConnection(
         return sessionId;
     }
 
-    // 세션 생성 시 elderId와 prompt 포함
+    // 세션 생성 시 elderId, settingId와 prompt 포함
     const session = createSession(sessionId, {
         openAIApiKey,
         elderId,
+        settingId,
         prompt,
         webhookUrl,
     });
@@ -331,12 +341,27 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
         return;
     }
 
+    // 스프링 서버 DTO 형식에 맞춰 데이터 변환
+    const transcriptionSegments = conversationHistory.map((item) => ({
+        speaker: item.is_elderly ? '어르신' : 'AI',
+        text: item.conversation,
+    }));
+
     const formattedData = {
         elderId: session?.elderId,
-        content: conversationHistory,
+        settingId: session?.settingId || 1, // 세션에서 가져오거나 기본값 사용
+        startTime: session?.startTime?.toISOString() || new Date().toISOString(),
+        endTime: session?.endTime?.toISOString() || new Date().toISOString(), // 통화 종료 시간
+        status: session?.callStatus || 'completed', // 통화 상태
+        responded: session?.responded || 0, // 응답 여부 (0: 응답하지 않음, 1: 응답함)
+        transcription: {
+            language: 'ko',
+            fullText: transcriptionSegments,
+        },
     };
 
     console.log(`웹훅 전송 (CallSid: ${session?.callSid}):`, webhookUrl);
+    console.log(`웹훅 URL 확인:`, webhookUrl);
     console.log(`웹훅 전송 데이터:`, JSON.stringify(formattedData, null, 2));
 
     try {
