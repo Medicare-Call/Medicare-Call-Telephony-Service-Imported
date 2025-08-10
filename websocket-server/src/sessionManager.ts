@@ -384,12 +384,19 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
 // === 통화 종료 처리 ===
 function closeAllConnections(sessionId: string): void {
     const session = getSession(sessionId);
-    if (!session) return;
+    if (!session) return; // 세션 없음 → 종료 처리 안 함
+
+    // ✅ 이미 종료된 세션인지 체크
+    if ((session as any)._closed) {
+        console.log(`이미 종료 처리된 세션 (CallSid: ${session.callSid}) → 중복 호출 방지`);
+        return;
+    }
+    (session as any)._closed = true; // 종료 처리 표시
 
     console.log(`세션 종료 처리 (CallSid: ${session.callSid})...`);
     console.log(`대화 기록: ${session.conversationHistory?.length || 0}개`);
 
-    // 웹훅 전송 (비동기)
+    // 웹훅 전송
     const sendWebhookPromise = async () => {
         if (session.conversationHistory && session.conversationHistory.length > 0) {
             console.log(`대화 기록 전송 중 (CallSid: ${session.callSid})...`);
@@ -403,9 +410,7 @@ function closeAllConnections(sessionId: string): void {
         }
     };
 
-    // 정리 작업
     Promise.resolve(sendWebhookPromise()).finally(() => {
-        // WebSocket 연결 종료
         if (session.twilioConn) {
             session.twilioConn.close();
             session.twilioConn = undefined;
