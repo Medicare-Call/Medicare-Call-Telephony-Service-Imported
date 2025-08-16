@@ -182,6 +182,9 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
 
         const call = await twilioClient.calls.create({
             url: twimlUrl.toString(),
+            statusCallback: `${PUBLIC_URL}/call/status-callback`,
+            // statusCallbackEvent: ['no-answer', 'answered'],
+            statusCallbackMethod: 'POST',
             method: 'POST',
             to: phoneNumber,
             from: availableCallerNumber,
@@ -215,6 +218,23 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
         logger.error('전화 실패:', err);
         res.status(500).json({ success: false, error: String(err) });
     }
+});
+// Express.js 예시
+mainRouter.post('/status-callback', (req, res) => {
+    const { CallSid, CallStatus, CallDuration, From, To } = req.body;
+    console.log('콜백 url 도착');
+
+    console.log(`Call ${CallSid} ended with status: ${CallStatus}`);
+
+    if (CallStatus === 'no-answer') {
+        console.log(`부재중 전화: ${From} → ${To}`);
+        // 부재중 처리 로직
+        // 예: 데이터베이스에 저장, 알림 발송 등
+    } else if (CallStatus === 'in-progress') {
+        console.log('전화 연결');
+    }
+
+    res.status(200).send('OK');
 });
 
 app.use('/call', mainRouter);
