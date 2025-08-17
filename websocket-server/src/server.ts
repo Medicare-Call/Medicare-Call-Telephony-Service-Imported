@@ -7,7 +7,7 @@ import http from 'http';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import cors from 'cors';
-import { handleCallConnection, sendToWebhook, getSession } from './sessionManager';
+import { handleCallConnection, sendToWebhook, getSession, deleteSession } from './sessionManager';
 import winston from 'winston';
 
 dotenv.config();
@@ -142,6 +142,8 @@ interface CallRequest {
     prompt?: string;
 }
 
+export const callInitiationData = new Map<string, { elderId: number; settingId: number; prompt?: string }>();
+
 mainRouter.post('/run', async (req: Request, res: Response) => {
     try {
         const { elderId, settingId, phoneNumber, prompt } = req.body;
@@ -183,22 +185,17 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
         const call = await twilioClient.calls.create({
             url: twimlUrl.toString(),
             statusCallback: `${PUBLIC_URL}/call/status-callback`,
-            // statusCallbackEvent: ['no-answer', 'answered'],
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
             statusCallbackMethod: 'POST',
             method: 'POST',
             to: phoneNumber,
             from: availableCallerNumber,
+            timeout: 30,
         });
 
-        // CallSid를 sessionId로 사용하여 프롬프트만 세션에 저장
-        const sessionId = call.sid; // Twilio에서 생성된 CallSid
-        if (prompt) {
-            (global as any).promptSessions = (global as any).promptSessions || new Map();
-            (global as any).promptSessions.set(sessionId, prompt);
-            logger.info(`프롬프트 세션 저장 - sessionId: ${sessionId}, prompt 길이: ${prompt.length}`);
-        }
+        callInitiationData.set(call.sid, { elderId, settingId, prompt });
+        logger.info(`통화 시작 정보 저장 - CallSid: ${call.sid}`);
 
-        // 발신 번호 사용 시작 및 CallSid와 매핑
         startUsingCallerNumber(availableCallerNumber);
         callToCallerNumber.set(call.sid, availableCallerNumber);
 
@@ -219,21 +216,72 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
         res.status(500).json({ success: false, error: String(err) });
     }
 });
-// Express.js 예시
-mainRouter.post('/status-callback', (req, res) => {
-    const { CallSid, CallStatus, CallDuration, From, To } = req.body;
-    console.log('콜백 url 도착');
 
-    console.log(`Call ${CallSid} ended with status: ${CallStatus}`);
+mainRouter.post('/status-callback', async (req, res) => {
+    const { CallSid, CallStatus } = req.body;
+    console.log(`[Status Callback] CallSid: ${CallSid}, Status: ${CallStatus}`);
 
-    if (CallStatus === 'no-answer') {
-        console.log(`부재중 전화: ${From} → ${To}`);
-        // 부재중 처리 로직
-        // 예: 데이터베이스에 저장, 알림 발송 등
-    } else if (CallStatus === 'in-progress') {
-        console.log('전화 연결');
+    // 최종 상태가 아니면 로깅만 하고 종료
+    const finalStatuses = ['completed', 'busy', 'no-answer', 'canceled', 'failed'];
+    if (!finalStatuses.includes(CallStatus)) {
+        console.log(`중간 상태 수신: ${CallStatus}. 최종 처리를 기다립니다.`);
+        res.status(200).send('OK');
+        return;
     }
 
+    const session = getSession(CallSid);
+
+    // case1: 통화 연결 성공
+    if (session) {
+        session.callStatus = CallStatus;
+        session.responded = CallStatus === 'completed' ? 1 : 0;
+        if (!session.endTime) {
+            session.endTime = new Date();
+        }
+
+        try {
+            console.log(`[Status Callback] 연결된 통화(${CallStatus}) 웹훅 전송 시도...`);
+            await sendToWebhook(session, session.conversationHistory);
+        } catch (error) {
+            console.error(`[Status Callback] 웹훅 전송 오류 (CallSid: ${CallSid}):`, error);
+        } finally {
+            deleteSession(CallSid);
+            res.status(200).send('OK');
+        }
+        return; // 여기서 함수 종료
+    }
+
+    // case2: 부재중, 실패 등 통화 미연결
+    const initialData = callInitiationData.get(CallSid);
+    if (initialData) {
+        console.log(`[Status Callback] 미연결 통화(${CallStatus}) 감지. 웹훅 전송 준비...`);
+        const { elderId, settingId } = initialData;
+
+        // 부재중 통화에 대한 웹훅 데이터 직접 생성
+        const failedCallSession = {
+            callSid: CallSid,
+            elderId: elderId,
+            settingId: settingId,
+            startTime: new Date(),
+            endTime: new Date(),
+            callStatus: CallStatus, // 'no-answer', 'busy' 등
+            responded: 0, // 응답 없음
+        };
+
+        try {
+            await sendToWebhook(failedCallSession, []);
+            console.log(`[Status Callback] 미연결 통화(${CallStatus}) 웹훅 전송 완료.`);
+        } catch (error) {
+            console.error(`[Status Callback] 미연결 통화 웹훅 전송 오류 (CallSid: ${CallSid}):`, error);
+        } finally {
+            callInitiationData.delete(CallSid);
+            res.status(200).send('OK');
+        }
+        return;
+    }
+
+    // CASE 3: 세션도 없고, 임시 데이터도 없는 경우 (비정상)
+    console.error(`[Status Callback] 세션과 통화 시작 정보 모두 없음: ${CallSid}.`);
     res.status(200).send('OK');
 });
 
@@ -244,51 +292,44 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         const url = new URL(req.url || '', `http://${req.headers.host}`);
         const parts = url.pathname.split('/').filter(Boolean);
 
-        if (parts.length < 2) {
+        if (parts.length < 2 || parts[0] !== 'call') {
             logger.error('WS 연결 URL이 올바르지 않습니다:', req.url);
             ws.close();
             return;
         }
 
-        // parts[0] = 'call', parts[1] = callSid, parts[2] = elderId
-        const type = parts[0];
-        const sessionId = parts[1];
-        const elderIdParam = parts[2];
+        const type = parts[0]; // 'call'
+        const sessionId = parts[1]; // callSid
 
-        // CallSid를 통해 프롬프트 가져오기
-        let prompt = undefined;
-        if (sessionId) {
-            prompt = (global as any).promptSessions?.get(sessionId);
-            if (prompt) {
-                // 사용 후 세션에서 제거
-                (global as any).promptSessions.delete(sessionId);
-                logger.info(`CallSid로 프롬프트 가져옴 - callSid: ${sessionId}, prompt 길이: ${prompt.length}`);
-            } else {
-                logger.info(`CallSid로 프롬프트를 찾을 수 없음 - callSid: ${sessionId}`);
-            }
-        }
-
-        // URL에서 settingId 가져오기
-        const settingIdParam = url.searchParams.get('settingId');
-        const settingId = settingIdParam ? parseInt(settingIdParam, 10) : undefined;
-
-        if (!elderIdParam) {
-            logger.error(`elderId가 없습니다. sessionId: ${sessionId}`);
+        const initialData = callInitiationData.get(sessionId);
+        if (!initialData) {
+            logger.error(`WS 연결: 통화 시작 정보를 찾을 수 없음 - CallSid: ${sessionId}`);
             ws.close();
             return;
         }
 
-        // elderId를 number로 변환
-        const elderId = parseInt(elderIdParam, 10);
-        if (isNaN(elderId)) {
-            logger.error(`elderId가 유효한 숫자가 아닙니다. sessionId: ${sessionId}, elderId: ${elderIdParam}`);
-            ws.close();
-            return;
-        }
+        callInitiationData.delete(sessionId);
+
+        const { elderId, settingId, prompt } = initialData;
 
         logger.info(
-            `WS 새 연결: type=${type}, sessionId=${sessionId}, elderId=${elderId}, prompt=${prompt ? '있음' : '없음'}`
+            `WS 새 연결: type=${type}, sessionId=${sessionId}, elderId=${elderId}, settingId=${settingId}, prompt=${
+                prompt ? '있음' : '없음'
+            }`
         );
+
+        // callConnections에 웹소켓 저장 및 이벤트 핸들러 등록
+        callConnections.set(sessionId, ws);
+        ws.on('close', () => {
+            const callerNumber = callToCallerNumber.get(sessionId);
+            if (callerNumber) {
+                stopUsingCallerNumber(callerNumber);
+                callToCallerNumber.delete(sessionId);
+                logger.info(`CallSid ${sessionId}의 발신 번호 ${callerNumber} 해제`);
+            }
+        });
+
+        handleCallConnection(ws, OPENAI_API_KEY, WEBHOOK_URL, elderId, settingId, prompt, sessionId);
 
         if (type === 'call') {
             callConnections.set(sessionId, ws);

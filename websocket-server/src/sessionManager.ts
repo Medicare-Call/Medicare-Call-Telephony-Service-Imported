@@ -331,9 +331,24 @@ function handleTruncation(sessionId: string): void {
     session.responseStartTimestamp = undefined;
 }
 
+function mapTwilioStatusToAppStatus(twilioStatus?: string): string {
+    if (!twilioStatus) return 'failed'; // 기본값
+
+    const mapping: { [key: string]: string } = {
+        completed: 'completed',
+        busy: 'busy',
+        'no-answer': 'no-answer',
+        canceled: 'failed', // 'canceled'는 'failed'로 매핑
+        failed: 'failed',
+    };
+    return mapping[twilioStatus] || 'failed'; // 매핑에 없는 경우 'failed' 처리
+}
+
 // === 웹훅 전송 함수 ===
-export async function sendToWebhook(sessionId: string, conversationHistory: any[]): Promise<void> {
-    const session = getSession(sessionId);
+export async function sendToWebhook(
+    session: Partial<Session> & { callSid: string },
+    conversationHistory: any[]
+): Promise<void> {
     const webhookUrl = session?.webhookUrl || process.env.WEBHOOK_URL;
 
     if (!webhookUrl) {
@@ -349,11 +364,11 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
 
     const formattedData = {
         elderId: session?.elderId,
-        settingId: session?.settingId || 1, // 세션에서 가져오거나 기본값 사용
+        settingId: session?.settingId || 1,
         startTime: session?.startTime?.toISOString() || new Date().toISOString(),
-        endTime: session?.endTime?.toISOString() || new Date().toISOString(), // 통화 종료 시간
-        status: session?.callStatus || 'completed', // 통화 상태
-        responded: session?.responded || 0, // 응답 여부 (0: 응답하지 않음, 1: 응답함)
+        endTime: session?.endTime?.toISOString() || new Date().toISOString(),
+        status: mapTwilioStatusToAppStatus(session?.callStatus),
+        responded: session?.responded === 1 ? 1 : 0,
         transcription: {
             language: 'ko',
             fullText: transcriptionSegments,
@@ -386,44 +401,27 @@ function closeAllConnections(sessionId: string): void {
     const session = getSession(sessionId);
     if (!session) return; // 세션 없음 → 종료 처리 안 함
 
-    // ✅ 이미 종료된 세션인지 체크
     if ((session as any)._closed) {
-        console.log(`이미 종료 처리된 세션 (CallSid: ${session.callSid}) → 중복 호출 방지`);
+        console.log(`이미 종료 처리된 세션 (CallSid: ${session.callSid})`);
         return;
     }
     (session as any)._closed = true; // 종료 처리 표시
 
-    console.log(`세션 종료 처리 (CallSid: ${session.callSid})...`);
     console.log(`대화 기록: ${session.conversationHistory?.length || 0}개`);
 
-    // 웹훅 전송
-    const sendWebhookPromise = async () => {
-        if (session.conversationHistory && session.conversationHistory.length > 0) {
-            console.log(`대화 기록 전송 중 (CallSid: ${session.callSid})...`);
-            try {
-                await sendToWebhook(sessionId, session.conversationHistory);
-            } catch (error) {
-                console.error(`웹훅 전송 실패 (CallSid: ${session.callSid}):`, error);
-            }
-        } else {
-            console.log(`전송할 대화 기록 없음 (CallSid: ${session.callSid})`);
-        }
-    };
+    if (!session.endTime) {
+        session.endTime = new Date();
+    }
 
-    Promise.resolve(sendWebhookPromise()).finally(() => {
-        if (session.twilioConn) {
-            session.twilioConn.close();
-            session.twilioConn = undefined;
-        }
-        if (session.modelConn) {
-            session.modelConn.close();
-            session.modelConn = undefined;
-        }
-
-        // 세션 삭제
-        sessions.delete(sessionId);
-        console.log(`세션 정리 완료 (CallSid: ${session.callSid})`);
-    });
+    // WebSocket 연결만 닫음
+    if (session.twilioConn) {
+        session.twilioConn.close();
+        session.twilioConn = undefined;
+    }
+    if (session.modelConn) {
+        session.modelConn.close();
+        session.modelConn = undefined;
+    }
 }
 
 // === 유틸리티 함수들 ===
@@ -472,4 +470,13 @@ export function getAllActiveSessions() {
             isActive: isOpen(session.twilioConn) && isOpen(session.modelConn),
         })),
     };
+}
+
+export function deleteSession(sessionId: string): boolean {
+    if (sessions.has(sessionId)) {
+        sessions.delete(sessionId);
+        console.log(`세션 최종 삭제 완료 (CallSid: ${sessionId})`);
+        return true;
+    }
+    return false;
 }
