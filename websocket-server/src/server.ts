@@ -190,7 +190,7 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
             method: 'POST',
             to: phoneNumber,
             from: availableCallerNumber,
-            timeout: 30,
+            timeout: 15,
         });
 
         callInitiationData.set(call.sid, { elderId, settingId, prompt });
@@ -227,6 +227,17 @@ mainRouter.post('/status-callback', async (req, res) => {
         console.log(`중간 상태 수신: ${CallStatus}. 최종 처리를 기다립니다.`);
         res.status(200).send('OK');
         return;
+    }
+
+    const callerNumber = callToCallerNumber.get(CallSid);
+    if (callerNumber) {
+        stopUsingCallerNumber(callerNumber);
+        callToCallerNumber.delete(CallSid);
+        logger.info(`[Status Callback] 최종 상태(${CallStatus}) 수신, 발신 번호 ${callerNumber} 해제 완료.`);
+    } else {
+        logger.warn(
+            `[Status Callback] CallSid ${CallSid}에 해당하는 발신 번호 정보를 찾을 수 없습니다. 이미 해제되었을 수 있습니다.`
+        );
     }
 
     const session = getSession(CallSid);
@@ -336,12 +347,8 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
             // WebSocket 연결 종료 시 발신 번호 해제
             ws.on('close', () => {
-                const callerNumber = callToCallerNumber.get(sessionId);
-                if (callerNumber) {
-                    stopUsingCallerNumber(callerNumber);
-                    callToCallerNumber.delete(sessionId);
-                    logger.info(`CallSid ${sessionId}의 발신 번호 ${callerNumber} 해제`);
-                }
+                callConnections.delete(sessionId);
+                logger.info(`WS 연결 종료: CallSid ${sessionId}`);
             });
 
             handleCallConnection(ws, OPENAI_API_KEY, WEBHOOK_URL, elderId, settingId, prompt, sessionId);
