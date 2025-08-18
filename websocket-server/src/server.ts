@@ -193,6 +193,7 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
             timeout: 30,
         });
 
+
         callInitiationData.set(call.sid, { elderId, settingId, prompt });
         logger.info(`통화 시작 정보 저장 - CallSid: ${call.sid}`);
 
