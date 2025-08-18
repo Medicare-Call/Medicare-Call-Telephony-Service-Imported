@@ -159,9 +159,9 @@ function connectToOpenAI(sessionId: string): void {
                 modalities: ['text', 'audio'],
                 turn_detection: {
                     type: 'server_vad',
-                    threshold: 0.6,
-                    prefix_padding_ms: 660,
-                    silence_duration_ms: 300,
+                    threshold: 0.7,
+                    prefix_padding_ms: 1200,
+                    silence_duration_ms: 700,
                 },
                 voice: 'ash',
                 input_audio_transcription: { model: 'whisper-1' },
