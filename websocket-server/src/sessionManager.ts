@@ -142,7 +142,7 @@ function connectToOpenAI(sessionId: string): void {
 
     console.log(`OpenAI 연결 중... (CallSid: ${session.callSid})`);
 
-    session.modelConn = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03', {
+    session.modelConn = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview', {
         headers: {
             Authorization: `Bearer ${session.openAIApiKey}`,
             'OpenAI-Beta': 'realtime=v1',
@@ -159,11 +159,11 @@ function connectToOpenAI(sessionId: string): void {
                 modalities: ['text', 'audio'],
                 turn_detection: {
                     type: 'server_vad',
-                    threshold: 0.7,
+                    threshold: 1.0,
                     prefix_padding_ms: 1200,
                     silence_duration_ms: 700,
                 },
-                voice: 'ash',
+                voice: 'Alloy',
                 input_audio_transcription: { model: 'whisper-1' },
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
