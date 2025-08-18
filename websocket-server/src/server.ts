@@ -193,6 +193,7 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
             (global as any).promptSessions = (global as any).promptSessions || new Map();
             (global as any).promptSessions.set(sessionId, prompt);
             logger.info(`프롬프트 세션 저장 - sessionId: ${sessionId}, prompt 길이: ${prompt.length}`);
+            logger.info(`프롬프트: ${prompt}`);
         }
 
         // 발신 번호 사용 시작 및 CallSid와 매핑
