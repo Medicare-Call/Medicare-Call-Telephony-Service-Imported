@@ -4,7 +4,7 @@ interface Session {
     sessionId: string;
     callSid: string;
     elderId?: number;
-    settingId?: number; // settingId 추가
+    settingId?: number;
     prompt?: string;
     twilioConn?: WebSocket;
     modelConn?: WebSocket;
@@ -15,10 +15,10 @@ interface Session {
     openAIApiKey: string;
     webhookUrl?: string;
     conversationHistory: { is_elderly: boolean; conversation: string }[];
-    startTime?: Date; // 통화 시작 시간 추가
-    callStatus?: string; // 통화 상태 추가
-    responded?: number; // 응답 여부 추가 (0: 응답하지 않음, 1: 응답함)
-    endTime?: Date; // 통화 종료 시간 추가
+    startTime?: Date;
+    callStatus?: string;
+    responded?: number;
+    endTime?: Date;
 }
 
 let sessions: Map<string, Session> = new Map();
@@ -27,7 +27,7 @@ export function getSession(sessionId: string): Session | undefined {
     return sessions.get(sessionId);
 }
 
-function createSession(
+export function createSession(
     callSid: string,
     config: {
         openAIApiKey: string;
@@ -66,32 +66,23 @@ export function handleCallConnection(
 ): string {
     const sessionId = callSid || `fallback_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    if (!callSid) {
-        console.warn(`CallSid가 제공되지 않음. 폴백 ID 사용: ${sessionId}`);
-    }
-
-    if (!elderId) {
-        console.error(`elderId는 필수입니다. sessionId: ${sessionId}`);
+    const session = getSession(sessionId);
+    if (!session) {
+        console.error(
+            `[Error] WebSocket 연결 시 세션을 찾을 수 없습니다: ${sessionId}. 통화가 먼저 생성되어야 합니다.`
+        );
         ws.close();
         return sessionId;
     }
 
-    // 세션 생성 시 elderId, settingId와 prompt 포함
-    const session = createSession(sessionId, {
-        openAIApiKey,
-        elderId,
-        settingId,
-        prompt,
-        webhookUrl,
-    });
-
+    // 기존 세션에 WebSocket 연결을 추가합니다.
     session.twilioConn = ws;
 
     ws.on('message', (data) => handleTwilioMessage(sessionId, data));
     ws.on('error', () => ws.close());
-    ws.on('close', () => closeAllConnections(sessionId));
+    ws.on('close', () => closeAllConnections(sessionId)); // closeAllConnections는 status-callback에서 주로 호출됩니다.
 
-    console.log(`세션 생성 완료 - CallSid: ${sessionId}, elderId: ${elderId}, prompt: ${prompt ? '설정됨' : '없음'}`);
+    console.log(`WebSocket 연결 완료 - CallSid: ${sessionId}`);
     return sessionId;
 }
 
@@ -168,9 +159,9 @@ function connectToOpenAI(sessionId: string): void {
                 modalities: ['text', 'audio'],
                 turn_detection: {
                     type: 'server_vad',
-                    threshold: 0.6,
-                    prefix_padding_ms: 660,
-                    silence_duration_ms: 300,
+                    threshold: 0.7,
+                    prefix_padding_ms: 1200,
+                    silence_duration_ms: 700,
                 },
                 voice: 'ash',
                 input_audio_transcription: { model: 'whisper-1' },
@@ -329,38 +320,76 @@ function handleTruncation(sessionId: string): void {
     session.responseStartTimestamp = undefined;
 }
 
+function mapTwilioStatusToDtoStatus(twilioStatus?: string): string {
+    switch (twilioStatus) {
+        // 성공적으로 완료된 통화
+        case 'completed':
+        case 'answered':
+        case 'in-progress': // 'in-progress'는 통화가 진행중임을 의미하며, 종료 시점에서는 'completed'로 처리
+            return 'completed';
+
+        // 실패한 통화
+        case 'failed':
+        case 'canceled':
+            return 'failed';
+
+        // 통화 중
+        case 'busy':
+            return 'busy';
+
+        // 부재중
+        case 'no-answer':
+            return 'no-answer';
+
+        // 예외 처리: 예상치 못한 상태값일 경우 'failed'로 처리하여 서버에 기록
+        default:
+            console.warn(`[Status Mapping] Unexpected Twilio status: "${twilioStatus}". Mapping to "failed".`);
+            return 'failed';
+    }
+}
+
 // === 웹훅 전송 함수 ===
-export async function sendToWebhook(sessionId: string, conversationHistory: any[]): Promise<void> {
+export async function sendToWebhook(sessionId: string): Promise<void> {
     const session = getSession(sessionId);
-    const webhookUrl = session?.webhookUrl || process.env.WEBHOOK_URL;
+    if (!session) {
+        console.error(`웹훅 전송 실패: 세션을 찾을 수 없음 (ID: ${sessionId})`);
+        return;
+    }
+    const webhookUrl = session.webhookUrl || process.env.WEBHOOK_URL;
 
     if (!webhookUrl) {
         console.log('웹훅 URL이 설정되지 않음');
         return;
     }
 
-    // 스프링 서버 DTO 형식에 맞춰 데이터 변환
-    const transcriptionSegments = conversationHistory.map((item) => ({
+    const transcriptionSegments = session.conversationHistory.map((item) => ({
         speaker: item.is_elderly ? '어르신' : 'AI',
         text: item.conversation,
     }));
 
+    // DTO 형식에 맞게 응답 여부 기본값 설정
+    let respondedValue: number;
+    if (session.responded !== undefined) {
+        respondedValue = session.responded;
+    } else {
+        // 응답 여부가 설정되지 않았다면, 대화 기록 유무로 판단
+        respondedValue = session.conversationHistory.length > 0 ? 1 : 0;
+    }
+
     const formattedData = {
-        elderId: session?.elderId,
-        settingId: session?.settingId || 1, // 세션에서 가져오거나 기본값 사용
-        startTime: session?.startTime?.toISOString() || new Date().toISOString(),
-        endTime: session?.endTime?.toISOString() || new Date().toISOString(), // 통화 종료 시간
-        status: session?.callStatus || 'completed', // 통화 상태
-        responded: session?.responded || 0, // 응답 여부 (0: 응답하지 않음, 1: 응답함)
+        elderId: session.elderId,
+        settingId: session.settingId || 1,
+        startTime: session.startTime?.toISOString(),
+        endTime: session.endTime?.toISOString() || new Date().toISOString(),
+        status: mapTwilioStatusToDtoStatus(session.callStatus),
+        responded: respondedValue, // Byte 타입에 맞게 number 전송
         transcription: {
             language: 'ko',
             fullText: transcriptionSegments,
         },
     };
 
-    console.log(`웹훅 전송 (CallSid: ${session?.callSid}):`, webhookUrl);
-    console.log(`웹훅 URL 확인:`, webhookUrl);
-    console.log(`웹훅 전송 데이터:`, JSON.stringify(formattedData, null, 2));
+    console.log(`웹훅 전송 데이터 (CallSid: ${session.callSid}):`, JSON.stringify(formattedData, null, 2));
 
     try {
         const response = await fetch(webhookUrl, {
@@ -370,41 +399,34 @@ export async function sendToWebhook(sessionId: string, conversationHistory: any[
         });
 
         if (response.ok) {
-            console.log(`웹훅 전송 성공 (CallSid: ${session?.callSid})`);
+            console.log(`웹훅 전송 성공 (CallSid: ${session.callSid})`);
         } else {
-            console.error(`웹훅 전송 실패 (CallSid: ${session?.callSid}):`, response.status);
+            const errorBody = await response.text();
+            console.error(`웹훅 전송 실패 (CallSid: ${session.callSid}):`, response.status, errorBody);
         }
     } catch (error) {
-        console.error(`웹훅 전송 오류 (CallSid: ${session?.callSid}):`, error);
+        console.error(`웹훅 전송 중 오류 발생 (CallSid: ${session.callSid}):`, error);
     }
 }
 
 // === 통화 종료 처리 ===
-function closeAllConnections(sessionId: string): void {
+export function closeAllConnections(sessionId: string): void {
     const session = getSession(sessionId);
-    if (!session) return; // 세션 없음 → 종료 처리 안 함
+    if (!session) return;
 
-    // ✅ 이미 종료된 세션인지 체크
     if ((session as any)._closed) {
         console.log(`이미 종료 처리된 세션 (CallSid: ${session.callSid}) → 중복 호출 방지`);
         return;
     }
-    (session as any)._closed = true; // 종료 처리 표시
+    (session as any)._closed = true;
 
-    console.log(`세션 종료 처리 (CallSid: ${session.callSid})...`);
-    console.log(`대화 기록: ${session.conversationHistory?.length || 0}개`);
+    console.log(`세션 종료 처리 시작 (CallSid: ${session.callSid})...`);
 
-    // 웹훅 전송
     const sendWebhookPromise = async () => {
-        if (session.conversationHistory && session.conversationHistory.length > 0) {
-            console.log(`대화 기록 전송 중 (CallSid: ${session.callSid})...`);
-            try {
-                await sendToWebhook(sessionId, session.conversationHistory);
-            } catch (error) {
-                console.error(`웹훅 전송 실패 (CallSid: ${session.callSid}):`, error);
-            }
-        } else {
-            console.log(`전송할 대화 기록 없음 (CallSid: ${session.callSid})`);
+        try {
+            await sendToWebhook(sessionId);
+        } catch (error) {
+            console.error(`웹훅 전송 Promise 실패 (CallSid: ${session.callSid}):`, error);
         }
     };
 
@@ -418,7 +440,6 @@ function closeAllConnections(sessionId: string): void {
             session.modelConn = undefined;
         }
 
-        // 세션 삭제
         sessions.delete(sessionId);
         console.log(`세션 정리 완료 (CallSid: ${session.callSid})`);
     });
