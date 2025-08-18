@@ -7,7 +7,7 @@ import http from 'http';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import cors from 'cors';
-import { handleCallConnection, sendToWebhook, getSession } from './sessionManager';
+import { handleCallConnection, getSession, closeAllConnections, createSession } from './sessionManager';
 import winston from 'winston';
 
 dotenv.config();
@@ -26,7 +26,6 @@ const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID!;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN!;
 
-// 여러 개의 발신 번호 관리
 const TWILIO_CALLER_NUMBERS = process.env.TWILIO_CALLER_NUMBERS?.split(',').map((num) => num.trim()) || [];
 if (TWILIO_CALLER_NUMBERS.length === 0) {
     logger.error('TWILIO_CALLER_NUMBERS environment variable is required (comma-separated)');
@@ -40,20 +39,17 @@ if (!OPENAI_API_KEY) {
     process.exit(1);
 }
 
-// 사용 중인 발신 번호 추적
 const activeCallerNumbers = new Set<string>();
 
-// 사용 가능한 발신 번호 선택 함수
 function getAvailableCallerNumber(): string | null {
     for (const number of TWILIO_CALLER_NUMBERS) {
         if (!activeCallerNumbers.has(number)) {
             return number;
         }
     }
-    return null; // 모든 번호가 사용 중
+    return null;
 }
 
-// 발신 번호 사용 시작
 function startUsingCallerNumber(number: string): void {
     activeCallerNumbers.add(number);
     logger.info(
@@ -61,12 +57,13 @@ function startUsingCallerNumber(number: string): void {
     );
 }
 
-// 발신 번호 사용 종료
 function stopUsingCallerNumber(number: string): void {
-    activeCallerNumbers.delete(number);
-    logger.info(
-        `발신 번호 사용 종료: ${number} (사용 중: ${activeCallerNumbers.size}/${TWILIO_CALLER_NUMBERS.length})`
-    );
+    if (activeCallerNumbers.has(number)) {
+        activeCallerNumbers.delete(number);
+        logger.info(
+            `발신 번호 사용 종료: ${number} (사용 중: ${activeCallerNumbers.size}/${TWILIO_CALLER_NUMBERS.length})`
+        );
+    }
 }
 
 const app = express();
@@ -81,7 +78,6 @@ export const callConnections = new Map<string, WebSocket>();
 export const modelConnections = new Map<string, WebSocket>();
 export const frontendConnections = new Map<string, WebSocket>();
 
-// CallSid와 사용 중인 발신 번호 매핑
 export const callToCallerNumber = new Map<string, string>();
 
 const twimlPath = join(__dirname, 'twiml.xml');
@@ -93,7 +89,6 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
     const callSid = req.body.CallSid;
     const elderIdParam = req.query.elderId || req.body.elderId;
 
-    // CallSid를 통해 프롬프트와 settingId 가져오기
     let prompt = undefined;
     let settingId = undefined;
     if (callSid) {
@@ -126,21 +121,12 @@ mainRouter.post('/twiml', (req: Request, res: Response) => {
         wsUrl.searchParams.set('settingId', settingId.toString());
     }
 
-    // 프롬프트는 이미 CallSid로 저장되어 있으므로 추가 저장 불필요
-
     const wsUrlString = wsUrl.toString().replace(/&/g, '&amp;');
     logger.info(`생성된 WebSocket URL: ${wsUrlString}`);
 
     const twimlContent = twimlTemplate.replace('{{WS_URL}}', wsUrlString);
     res.set('Content-Type', 'text/xml; charset=utf-8').send(twimlContent);
 });
-
-interface CallRequest {
-    elderId: number;
-    settingId: number;
-    phoneNumber?: string;
-    prompt?: string;
-}
 
 mainRouter.post('/run', async (req: Request, res: Response) => {
     try {
@@ -158,7 +144,6 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
             return;
         }
 
-        // 사용 가능한 발신 번호 선택
         const availableCallerNumber = getAvailableCallerNumber();
         if (!availableCallerNumber) {
             logger.error('모든 발신 번호가 사용 중입니다');
@@ -182,21 +167,26 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
 
         const call = await twilioClient.calls.create({
             url: twimlUrl.toString(),
+            statusCallback: `${PUBLIC_URL}/call/status-callback`,
+            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+            statusCallbackMethod: 'POST',
             method: 'POST',
             to: phoneNumber,
             from: availableCallerNumber,
+            timeout: 15,
         });
 
-        // CallSid를 sessionId로 사용하여 프롬프트만 세션에 저장
-        const sessionId = call.sid; // Twilio에서 생성된 CallSid
-        if (prompt) {
-            (global as any).promptSessions = (global as any).promptSessions || new Map();
-            (global as any).promptSessions.set(sessionId, prompt);
-            logger.info(`프롬프트 세션 저장 - sessionId: ${sessionId}, prompt 길이: ${prompt.length}`);
-            logger.info(`프롬프트: ${prompt}`);
-        }
+        createSession(call.sid, {
+            openAIApiKey: OPENAI_API_KEY,
+            webhookUrl: WEBHOOK_URL,
+            elderId,
+            settingId,
+            prompt,
+        });
 
-        // 발신 번호 사용 시작 및 CallSid와 매핑
+        startUsingCallerNumber(availableCallerNumber);
+        callToCallerNumber.set(call.sid, availableCallerNumber);
+
         startUsingCallerNumber(availableCallerNumber);
         callToCallerNumber.set(call.sid, availableCallerNumber);
 
@@ -218,6 +208,49 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
     }
 });
 
+mainRouter.post('/status-callback', (req: Request, res: Response) => {
+    const callSid = req.body.CallSid;
+    const callStatus = req.body.CallStatus;
+
+    logger.info(`📞 상태 콜백 수신 - CallSid: ${callSid}, Status: ${callStatus}`);
+
+    if (!callSid || !callStatus) {
+        res.status(400).send('CallSid and CallStatus are required');
+        return;
+    }
+
+    const session = getSession(callSid);
+    if (session) {
+        session.callStatus = callStatus;
+        if (callStatus === 'answered') {
+            session.responded = 1;
+        } else if (['no-answer', 'busy', 'failed', 'canceled'].includes(callStatus)) {
+            session.responded = 0;
+        }
+    }
+
+    const terminalStatuses = ['completed', 'busy', 'no-answer', 'failed', 'canceled'];
+
+    if (terminalStatuses.includes(callStatus)) {
+        const callerNumber = callToCallerNumber.get(callSid);
+
+        if (callerNumber) {
+            stopUsingCallerNumber(callerNumber);
+            callToCallerNumber.delete(callSid);
+            logger.info(`통화 종료 [${callStatus}] - 발신 번호 ${callerNumber} 해제 (CallSid: ${callSid})`);
+        } else {
+            logger.warn(`통화 종료 [${callStatus}] - CallSid ${callSid}에 매핑된 발신 번호를 찾을 수 없음`);
+        }
+
+        if (session) {
+            session.endTime = new Date();
+            closeAllConnections(callSid);
+        }
+    }
+
+    res.status(200).send('OK');
+});
+
 app.use('/call', mainRouter);
 
 wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
@@ -231,17 +264,15 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
             return;
         }
 
-        // parts[0] = 'call', parts[1] = callSid, parts[2] = elderId
         const type = parts[0];
         const sessionId = parts[1];
         const elderIdParam = parts[2];
 
-        // CallSid를 통해 프롬프트 가져오기
+        // This part of the code now works correctly because the prompt was saved in `/run`
         let prompt = undefined;
         if (sessionId) {
             prompt = (global as any).promptSessions?.get(sessionId);
             if (prompt) {
-                // 사용 후 세션에서 제거
                 (global as any).promptSessions.delete(sessionId);
                 logger.info(`CallSid로 프롬프트 가져옴 - callSid: ${sessionId}, prompt 길이: ${prompt.length}`);
             } else {
@@ -249,7 +280,6 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
             }
         }
 
-        // URL에서 settingId 가져오기
         const settingIdParam = url.searchParams.get('settingId');
         const settingId = settingIdParam ? parseInt(settingIdParam, 10) : undefined;
 
@@ -259,7 +289,6 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
             return;
         }
 
-        // elderId를 number로 변환
         const elderId = parseInt(elderIdParam, 10);
         if (isNaN(elderId)) {
             logger.error(`elderId가 유효한 숫자가 아닙니다. sessionId: ${sessionId}, elderId: ${elderIdParam}`);
@@ -274,14 +303,8 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         if (type === 'call') {
             callConnections.set(sessionId, ws);
 
-            // WebSocket 연결 종료 시 발신 번호 해제
             ws.on('close', () => {
-                const callerNumber = callToCallerNumber.get(sessionId);
-                if (callerNumber) {
-                    stopUsingCallerNumber(callerNumber);
-                    callToCallerNumber.delete(sessionId);
-                    logger.info(`CallSid ${sessionId}의 발신 번호 ${callerNumber} 해제`);
-                }
+                logger.info(`WebSocket 연결 종료됨 (CallSid: ${sessionId}). 상태 콜백이 번호 해제를 처리합니다.`);
             });
 
             handleCallConnection(ws, OPENAI_API_KEY, WEBHOOK_URL, elderId, settingId, prompt, sessionId);
