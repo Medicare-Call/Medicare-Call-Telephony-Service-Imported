@@ -163,7 +163,7 @@ function connectToOpenAI(sessionId: string): void {
                     prefix_padding_ms: 1200,
                     silence_duration_ms: 700,
                 },
-                voice: 'Alloy',
+                voice: 'alloy',
                 input_audio_transcription: { model: 'whisper-1' },
                 input_audio_format: 'g711_ulaw',
                 output_audio_format: 'g711_ulaw',
