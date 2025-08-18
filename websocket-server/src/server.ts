@@ -173,7 +173,7 @@ mainRouter.post('/run', async (req: Request, res: Response) => {
             method: 'POST',
             to: phoneNumber,
             from: availableCallerNumber,
-            timeout: 15,
+            timeout: 50,
         });
 
         createSession(call.sid, {
@@ -212,7 +212,7 @@ mainRouter.post('/status-callback', (req: Request, res: Response) => {
     const callSid = req.body.CallSid;
     const callStatus = req.body.CallStatus;
 
-    logger.info(`📞 상태 콜백 수신 - CallSid: ${callSid}, Status: ${callStatus}`);
+    logger.info(`상태 콜백 수신 - CallSid: ${callSid}, Status: ${callStatus}`);
 
     if (!callSid || !callStatus) {
         res.status(400).send('CallSid and CallStatus are required');
