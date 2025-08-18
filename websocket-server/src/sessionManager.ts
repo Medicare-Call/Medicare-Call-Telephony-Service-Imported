@@ -190,7 +190,6 @@ function connectToOpenAI(sessionId: string): void {
 
     session.modelConn.on('message', (data) => {
         const ts = Date.now();
-        console.log(`[OpenAI 응답 수신] ${ts}`);
         handleOpenAIMessage(sessionId, data);
     });
     session.modelConn.on('error', (error) => {
@@ -235,7 +234,6 @@ function handleOpenAIMessage(sessionId: string, data: RawData): void {
 
         case 'response.audio.delta':
             const t = Date.now();
-            console.log(`[AI 응답 전달 시작] ${t}`);
             // AI 음성 응답을 Twilio로 전달
             if (session.twilioConn && session.streamSid) {
                 if (session.responseStartTimestamp === undefined) {
