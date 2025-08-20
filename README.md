@@ -1,6 +1,8 @@
 # Medicare Call Telephony Server
 <img width="3840" height="2160" alt="image" src="https://github.com/user-attachments/assets/92d363ae-f60e-4de4-a7e6-a1b606dd0537" />
 
+- [비즈니스 서버](https://github.com/Medicare-Call/Medicare-Call-Backend)
+
 ## 주요 기능
 - 실시간 음성 스트리밍 및 AI 연동: Twilio와 WebSocket을 사용하여 실시간으로 음성 데이터를 스트리밍하고 OpenAI의 음성 AI 모델과 통신하여 자연스러운 대화를 구현합니다.
 - 통화 상태 관리: Twilio로부터 completed, busy, no-answer 등 통화 상태에 대한 콜백을 받아 실시간으로 통화 상태를 업데이트하고 관리합니다.
@@ -51,6 +53,7 @@ TypeScript 코드를 JavaScript로 컴파일하여 `dist`디렉토리에 저장�
 npm start
 ```
 컴파일된 `dist/server.js` 파일을 실행합니다.
+
 
 
 
