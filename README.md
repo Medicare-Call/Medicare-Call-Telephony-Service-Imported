@@ -35,9 +35,22 @@ npm install
 | `TWILIO_ACCOUNT_SID` | Twilio 계정 SID | `your_twilio_account_sid` |
 | `TWILIO_AUTH_TOKEN` | Twilio 인증 토큰 | `your_twilio_auth_token` |
 | `TWILIO_CALLER_NUMBERS` | 동시 통화를 위해 쉼표로 구분된 발신자 전화번호 목록입니다. 서버는 이 목록에서 사용 가능한 번호를 자동으로 선택하여 전화를 겁니다. | `+16512341234,+16512345678` |
-4. 서버 실행:
+4. 실행 및 테스트:
+- 개발 모드 실행:
 ```bash
 npm run dev
 ```
+이 명령어는 소스 코드 변경 시 자동으로 서버를 재시작합니다.
+- 빌드:
+```bash
+npm run build
+```
+TypeScript 코드를 JavaScript로 컴파일하여 `dist`디렉토리에 저장합니다.
+- 프로덕션 모드 실행:
+```bash
+npm start
+```
+컴파일된 `dist/server.js` 파일을 실행합니다.
+
 
 
